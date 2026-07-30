@@ -299,6 +299,50 @@ html, body {
 .chart-wrap { position: relative; height: 270px; }
 .chart-wrap-tall { height: 420px; }
 
+/* Chart scroll controls */
+.chart-scroll-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px 2px;
+  border-top: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+.chart-scroll-label { color: var(--text-dim); font-size: 11px; }
+.chart-scroll-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.chart-scroll-btn:hover { background: var(--surface-3); color: var(--text-primary); }
+.chart-scroll-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.chart-scroll-btn-accent {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.chart-window-select {
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  color: var(--text-dim);
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.chart-scroll-range-info {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 /* -------------------------- Logs view (full page) ------------------------ */
 
 .logs-layout { padding-bottom: 24px; }

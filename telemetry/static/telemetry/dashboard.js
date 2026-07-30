@@ -23,6 +23,14 @@
   const CONSOLE_MAX_LINES = 200;   // Rolling buffer cap to bound DOM size.
   const API_HISTORICAL = "/api/telemetry/historical/";
 
+  // Chart scroll state: all historical points kept in memory, only a window
+  // slice rendered to Chart.js so the canvas stays readable regardless of
+  // how many data points have accumulated.
+  let allChartPoints = [];
+  let allChartThresholds = {};
+  let chartWindowSize = 200;   // Number of points to display at once (0 = all).
+  let chartOffset = 0;         // Points from the latest end that are hidden (pan left = increase).
+
   // Master-node (ESP32-S3) spike-risk decision threshold. Overwritten on
   // every poll from the API's echoed `thresholds.ammonia_spike_risk_threshold`
   // (telemetry.classifier.AMMONIA_SPIKE_RISK_THRESHOLD) so this default is
@@ -254,24 +262,53 @@
   }
 
   function renderCharts(points, thresholds) {
-    const labels = points.map((p) => fmtClock(p.timestamp));
-
-    // Chart.js treats null y-values as gaps; map missing forecasts to null
-    // so partially-linked hardware (some points forecast, some not) also
-    // renders correctly.
     const nullSafe = (v) => (typeof v === "number" ? v : null);
 
+    // Determine visible slice based on window size and pan offset.
+    let slice;
+    if (chartWindowSize === 0 || points.length <= chartWindowSize) {
+      slice = points;
+    } else {
+      const end = points.length - chartOffset;
+      const start = Math.max(0, end - chartWindowSize);
+      slice = points.slice(start, end);
+    }
+
+    const labels = slice.map((p) => fmtClock(p.timestamp));
+
     tempChart.data.labels = labels;
-    tempChart.data.datasets[0].data = points.map((p) => p.temperature);
-    tempChart.data.datasets[1].data = points.map((p) => nullSafe(p.predicted_temperature));
-    tempChart.data.datasets[2].data = points.map(() => thresholds.heat_stress_temp_c);
+    tempChart.data.datasets[0].data = slice.map((p) => p.temperature);
+    tempChart.data.datasets[1].data = slice.map((p) => nullSafe(p.predicted_temperature));
+    tempChart.data.datasets[2].data = slice.map(() => thresholds.heat_stress_temp_c);
     tempChart.update();
 
     ammoniaChart.data.labels = labels;
-    ammoniaChart.data.datasets[0].data = points.map((p) => p.ammonia_level);
-    ammoniaChart.data.datasets[1].data = points.map((p) => nullSafe(p.predicted_ammonia));
-    ammoniaChart.data.datasets[2].data = points.map(() => thresholds.ammonia_critical_ppm);
+    ammoniaChart.data.datasets[0].data = slice.map((p) => p.ammonia_level);
+    ammoniaChart.data.datasets[1].data = slice.map((p) => nullSafe(p.predicted_ammonia));
+    ammoniaChart.data.datasets[2].data = slice.map(() => thresholds.ammonia_critical_ppm);
     ammoniaChart.update();
+
+    // Update nav button states.
+    const btnPrev = document.getElementById("chart-prev");
+    const btnNext = document.getElementById("chart-next");
+    const btnLatest = document.getElementById("chart-latest");
+    const totalPts = points.length;
+    const win = chartWindowSize === 0 ? totalPts : chartWindowSize;
+    if (btnPrev)   btnPrev.disabled = (chartOffset + win >= totalPts);
+    if (btnNext)   btnNext.disabled = (chartOffset <= 0);
+    if (btnLatest) btnLatest.disabled = (chartOffset <= 0);
+
+    // Range info label.
+    const rangeInfo = document.querySelector(".chart-scroll-range-info");
+    if (rangeInfo) {
+      if (chartWindowSize === 0 || points.length <= chartWindowSize) {
+        rangeInfo.textContent = `All ${totalPts} pts`;
+      } else {
+        const end = totalPts - chartOffset;
+        const start = Math.max(1, end - win + 1);
+        rangeInfo.textContent = `${start}–${end} / ${totalPts}`;
+      }
+    }
   }
 
   /* --------------------------- Live console feed -------------------------- */
@@ -399,7 +436,10 @@
       }
 
       setLinkState("online", "Link online");
-      renderCharts(body.data, body.thresholds);
+      // Store all points for the windowed chart renderer.
+      allChartPoints = body.data;
+      allChartThresholds = body.thresholds;
+      renderCharts(allChartPoints, allChartThresholds);
       appendConsoleLines(body.data);
       if (body.data.length > 0) {
         renderMetrics(body.data[body.data.length - 1]);
@@ -416,6 +456,49 @@
     resetConsole();
     refresh();
   });
+
+  /* -------------------- Chart scroll control wiring -------------------- */
+
+  const SCROLL_STEP = 50;   // Points to pan per button press.
+
+  function setupChartScrollControls() {
+    const btnPrev    = document.getElementById("chart-prev");
+    const btnNext    = document.getElementById("chart-next");
+    const btnLatest  = document.getElementById("chart-latest");
+    const winSelect  = document.getElementById("chart-window-select");
+
+    if (!btnPrev || !btnNext || !btnLatest || !winSelect) return;
+
+    // Add range info label next to Latest button.
+    const rangeSpan = document.createElement("span");
+    rangeSpan.className = "chart-scroll-range-info";
+    btnLatest.parentNode.appendChild(rangeSpan);
+
+    winSelect.addEventListener("change", () => {
+      chartWindowSize = parseInt(winSelect.value, 10);
+      chartOffset = 0;   // Reset to latest when changing window size.
+      renderCharts(allChartPoints, allChartThresholds);
+    });
+
+    btnPrev.addEventListener("click", () => {
+      const win = chartWindowSize === 0 ? allChartPoints.length : chartWindowSize;
+      const maxOffset = Math.max(0, allChartPoints.length - win);
+      chartOffset = Math.min(chartOffset + SCROLL_STEP, maxOffset);
+      renderCharts(allChartPoints, allChartThresholds);
+    });
+
+    btnNext.addEventListener("click", () => {
+      chartOffset = Math.max(0, chartOffset - SCROLL_STEP);
+      renderCharts(allChartPoints, allChartThresholds);
+    });
+
+    btnLatest.addEventListener("click", () => {
+      chartOffset = 0;
+      renderCharts(allChartPoints, allChartThresholds);
+    });
+  }
+
+  setupChartScrollControls();
 
   refresh();
   setInterval(refresh, POLL_INTERVAL_MS);

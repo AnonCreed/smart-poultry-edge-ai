@@ -139,6 +139,19 @@
           </div>
         </div>
         <div class="chart-wrap chart-wrap-tall"><canvas id="chart-temperature"></canvas></div>
+        <div class="chart-scroll-bar">
+          <button id="chart-prev" type="button" class="chart-scroll-btn" title="Scroll older">&#8592; Older</button>
+          <span class="chart-scroll-label">Window:</span>
+          <select id="chart-window-select" class="chart-window-select">
+            <option value="50">50 pts</option>
+            <option value="100">100 pts</option>
+            <option value="200" selected>200 pts</option>
+            <option value="500">500 pts</option>
+            <option value="0">All</option>
+          </select>
+          <button id="chart-next" type="button" class="chart-scroll-btn" title="Scroll newer">Newer &#8594;</button>
+          <button id="chart-latest" type="button" class="chart-scroll-btn chart-scroll-btn-accent" title="Jump to latest">&#9654; Latest</button>
+        </div>
       </article>
 
       <article class="card panel">
