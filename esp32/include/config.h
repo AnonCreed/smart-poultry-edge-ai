@@ -13,18 +13,28 @@
 // Overwrite before flashing production units. In a proper deployment these
 // should come from NVS provisioning (WiFiManager or ESP-IDF wifi_prov_mgr),
 // not compile-time constants -- kept here as literals for demo clarity only.
+//
+// This node no longer talks to Django directly (see HARDWARE_DOCUMENTATION.md
+// "ESP-NOW pipeline"): it joins the WiFi AP only so it (a) lands on the same
+// 2.4 GHz channel as the ESP32-S3 master, which ESP-NOW requires, and (b) can
+// pull real wall-clock time via NTP for the model's hour/month cyclic
+// features. Telemetry itself goes out over ESP-NOW to MASTER_MAC_ADDR below;
+// the master owns the WiFi/HTTP leg to Django.
 #define WIFI_SSID       "your-network-ssid"
 #define WIFI_PASSWORD   "your-network-password"
 
-// LAN address of the Django server hosting the telemetry API. When the ESP32
-// and the server share a subnet, use the server's private IP; using
-// "127.0.0.1" here would resolve to the ESP32 itself and fail.
-#define API_BASE_URL    "http://192.168.1.100:8000"
-#define API_SUBMIT_PATH "/api/telemetry/submit/"
+// MAC address of the ESP32-S3 master node's WiFi station interface. Flash
+// esp32s3_master/ first and copy the "Receiver MAC: XX:XX:XX:XX:XX:XX" line
+// it prints on boot into this array (byte order matches, no reversal needed).
+#define MASTER_MAC_ADDR { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }
 
-// HTTP timeout: keep short so a transient outage doesn't stall the sample
-// loop for tens of seconds. Retries happen on the next tick.
-#define HTTP_TIMEOUT_MS 4000
+// NTP time source for the model's hour-of-day / month-of-year cyclic
+// features (see esp32s3_master/esp32s3_inference_receiver.ino). Set
+// GMT_OFFSET_SEC to your local standard-time offset, e.g. IST = 19800.
+#define NTP_SERVER            "pool.ntp.org"
+#define GMT_OFFSET_SEC         0
+#define DAYLIGHT_OFFSET_SEC    0
+#define NTP_SYNC_TIMEOUT_MS    5000
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -93,13 +103,3 @@
 // ADC full-scale: 12-bit resolution, 11 dB attenuation -> 0..3.3 V.
 #define ADC_MAX_COUNTS   4095.0f
 #define ADC_MAX_VOLTS    3.3f
-
-// ---------------------------------------------------------------------------
-// Edge-AI forecast stub
-// ---------------------------------------------------------------------------
-// Set to 1 to transmit a lightweight one-tick-ahead extrapolation in the
-// predicted_temperature / predicted_ammonia fields. Set to 0 to transmit
-// them as JSON null, matching the dashboard's "hardware not yet linked"
-// default state. When the real TFLite Micro model is deployed, replace the
-// stub in main.cpp; the payload contract stays identical.
-#define ENABLE_EDGE_AI_STUB 1

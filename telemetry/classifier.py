@@ -25,6 +25,13 @@ HEAT_STRESS_TEMP_C = 35.0
 HEAT_STRESS_HUMIDITY_PCT = 70.0
 LOW_TEMP_C = 18.0
 
+# Decision threshold for the ESP32-S3 master node's TFLite Micro spike
+# classifier (predicted_spike_probability >= this -> spike predicted). Must
+# stay numerically identical to kSpikeThreshold in
+# esp32s3_master/scaler_params.h; the two are trained/calibrated together and
+# are echoed here only so the API/dashboard don't hardcode a second copy.
+AMMONIA_SPIKE_RISK_THRESHOLD = 0.21
+
 
 def classify_environment(temperature: float, humidity: float, ammonia_level: float) -> str:
     """Map a raw sensor triplet to a classification label. Pure and stateless."""

@@ -1,8 +1,18 @@
 # Hardware & Embedded Firmware Architecture Defense Guide
 
+> **Two-board architecture as of the ESP-NOW revision.** The system is now
+> two microcontrollers, not one: an **ESP32 DevKit V1 sensor node**
+> (`esp32/`, unchanged hardware, revised firmware) reads DHT22/MQ-137 and
+> sends raw samples over **ESP-NOW** to an **ESP32-S3 master node**
+> (`esp32s3_master/`, new), which runs an on-device TFLite Micro model and
+> owns the WiFi/HTTP leg to Django. Everything below that describes the
+> single-board HTTP pipeline has been updated to describe the sensor node's
+> half only; the master node's half is documented where it diverges, and in
+> full in `esp32s3_master/README.md`.
+
 ## 1. Stack Overview & Library Analysis
-- Microcontroller Hardware: ESP32 DevKit V1 class board, selected via board = esp32dev in PlatformIO.
-- Core Framework: PlatformIO build system with Arduino C++ framework on Espressif32.
+- Microcontroller Hardware: ESP32 DevKit V1 class board (sensor node), selected via board = esp32dev in PlatformIO, plus an ESP32-S3 board (master node) running an Arduino IDE sketch.
+- Core Framework: PlatformIO build system with Arduino C++ framework on Espressif32 for the sensor node; Arduino IDE with the same Espressif "esp32" board package for the master node (required by its TensorFlowLite_ESP32 library dependency -- see esp32s3_master/README.md's "Why Arduino IDE, not PlatformIO").
 
 ### Build and Runtime Context
 - MCU family: ESP32 (dual-core Xtensa, integrated Wi-Fi, hardware PWM via LEDC, ADC1/ADC2 blocks).
@@ -35,18 +45,17 @@
 - How it operates inside the code:
   - Indirect use through DHT library internals; not directly referenced in source.
 
-3. bblanchon/ArduinoJson @ ^7.0.4
+3. ESP-NOW (`esp_now.h`, bundled with the esp32 Arduino core -- no lib_deps entry)
 - Which library is used:
-  - JSON serialization/deserialization engine for request payload and response parsing.
+  - Espressif's connectionless peer-to-peer WiFi-radio protocol, used in place of the JSON/HTTP request-response pattern the single-board design used.
 - Why it was chosen over alternatives:
-  - Deterministic static-document option (StaticJsonDocument) supports low-fragmentation embedded design.
-  - Strong type-safe API and robust parse error reporting.
-  - More memory-control-oriented than ad hoc String concatenation parsers.
+  - The sensor node no longer needs a full IP/HTTP stack to reach the master -- ESP-NOW is a raw, low-latency link over the same 2.4 GHz radio, well suited to a compact fixed-size struct sent every 5 s.
+  - No AP round-trip per message; delivery is acknowledged at the radio layer via a send-status callback (`onDataSent`), which is enough for this system's hold-last-state fault model.
 - How it operates inside the code:
-  - StaticJsonDocument<256> doc for outgoing payload.
-  - serializeJson(doc, body) into HTTP POST body.
-  - StaticJsonDocument<384> respDoc for server response.
-  - deserializeJson(respDoc, http.getStream()) then extract record.predicted_class.
+  - `esp_now_init()`, `esp_now_register_send_cb`/`esp_now_register_recv_cb`, and `esp_now_add_peer()` with the master's MAC address (`MASTER_MAC_ADDR` in config.h) in `initEspNow()`.
+  - `esp_now_send()` transmits a `SensorPacket` struct (not JSON -- a fixed-layout binary struct, memcpy'd directly into/out of the ESP-NOW payload on both boards).
+  - `onDataRecv()` receives an `ActuatorCommand` struct relayed back from the master, under a critical section since the callback runs in the WiFi task context.
+- Note: the master node (`esp32s3_master/`) still uses `bblanchon/ArduinoJson` and `HTTPClient.h` exactly as described in the original single-board design below -- it has simply moved from this board to that one. See `esp32s3_master/README.md`.
 
 ### Dependency Breakdown from include directives in main.cpp
 1. Arduino.h
@@ -61,21 +70,25 @@
 - Which library is used:
   - ESP32 Wi-Fi station client stack wrapper.
 - Why chosen:
-  - Native ESP32 Arduino networking API with reliable STA mode support.
+  - Native ESP32 Arduino networking API with reliable STA mode support. Retained on this board even though it no longer speaks HTTP, because ESP-NOW needs a WiFi interface to be up and on the right channel, and NTP time sync needs an IP link.
 - How it operates inside the code:
-  - WiFi.mode(WIFI_STA), WiFi.setSleep(false), WiFi.begin(...), WiFi.status(), WiFi.disconnect(...), WiFi.localIP(), WiFi.RSSI().
+  - WiFi.mode(WIFI_STA), WiFi.setSleep(false), WiFi.begin(...), WiFi.status(), WiFi.disconnect(...), WiFi.localIP(), WiFi.RSSI(), WiFi.channel().
 
-3. HTTPClient.h
+3. esp_now.h
 - Which library is used:
-  - ESP32 HTTP client abstraction over TCP.
+  - ESP32 ESP-NOW peer-to-peer protocol, bundled with the esp32 Arduino core.
 - Why chosen:
-  - Minimal code footprint to implement REST POST/headers/timeouts.
-  - Simpler than raw WiFiClient + manual HTTP framing.
+  - Replaces HTTPClient.h/ArduinoJson.h on this board (see the ESP-NOW dependency entry above) now that Django ingestion happens on the master node instead.
 - How it operates inside the code:
-  - HTTPClient http; http.begin(base+path); http.addHeader(...); http.POST(body); http.getStream(); http.end().
+  - esp_now_init(), esp_now_register_send_cb/esp_now_register_recv_cb, esp_now_add_peer(), esp_now_send().
 
-4. ArduinoJson.h
-- Used for deterministic JSON encode/decode as described above.
+4. time.h
+- Which library is used:
+  - Standard C time API, used via the Arduino core's configTime()/getLocalTime() NTP helpers.
+- Why chosen:
+  - The master's model needs hour-of-day/month-of-year cyclic features; this board is the one with a WiFi link, so it is the natural place to source wall-clock time and forward it alongside each sample.
+- How it operates inside the code:
+  - configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER) once after WiFi connects; getLocalTime(&timeinfo, ...) per sample to populate SensorPacket::hour/month.
 
 5. DHT.h
 - Used to read DHT22 sensor values via DHT class.
@@ -97,11 +110,15 @@
   - Supplies all literal values referenced in setup/loop and helper functions.
 
 ### Custom C++ Source/Header Inventory
-- Source files:
-  - esp32/src/main.cpp
-- Header files:
-  - esp32/include/config.h
-- No additional custom C++ compilation units were found in the PlatformIO workspace.
+- Sensor node (PlatformIO, ESP32 DevKit V1):
+  - Source: esp32/src/main.cpp
+  - Header: esp32/include/config.h
+- Master node (Arduino IDE sketch, ESP32-S3):
+  - Sketch: esp32s3_master/esp32s3_master.ino
+  - Headers: esp32s3_master/config_master.h (network/pairing config),
+    esp32s3_master/model_data.h and esp32s3_master/scaler_params.h (trained
+    TFLite Micro model + feature normalization -- generated artifacts, not
+    hand-written logic).
 
 ## 2. Complete GPIO & Circuit Pinout Table
 
@@ -114,55 +131,91 @@
 | USB-UART Serial (console) | UART0 default pins (board routed via USB bridge) | Debug/Interface | Digital UART | TX active-high line logic | Boot logs, diagnostics, telemetry printouts at 115200 baud. |
 
 ### Electrical and Pin-Selection Rationale
-- GPIO34 is input-only and mapped to ADC1, which remains usable while Wi-Fi is active; this is critical because ADC2 is unavailable during active Wi-Fi on classic ESP32.
+- GPIO34 is input-only and mapped to ADC1, which remains usable while Wi-Fi is active; this is critical because ADC2 is unavailable during active Wi-Fi on classic ESP32. This still holds with ESP-NOW: the sensor node's WiFi interface stays associated (see below), so the same ADC1-while-WiFi constraint applies unchanged.
 - PWM fan/heater on GPIO32/33 avoids strapping/conflict pins and supports LEDC hardware channels with independent duty control.
 - DHT22 data line on GPIO4 is a common safe GPIO with external 10 kOhm pull-up assumption.
 
 ## 3. Communication & Data Transmission Pipeline
-- Network Protocol:
+
+Two hops now, not one:
+
+```
+Sensor node (ESP32)  --ESP-NOW-->  Master node (ESP32-S3)  --WiFi/HTTP-->  Django
+       ^                                                          |
+       `------------------ ESP-NOW (classification) --------------'
+```
+
+- Hop 1 -- sensor node to master, ESP-NOW:
+  - Physical/link: IEEE 802.11 Wi-Fi radio, used in ESP-NOW connectionless mode (no association/handshake, no IP).
+  - Transport/application: a fixed-layout `SensorPacket` C struct, sent with `esp_now_send()` directly to the master's MAC address -- no serialization, no HTTP.
+  - Both boards must share a WiFi channel for this to work; the design guarantees that by having both join the same AP (see the sensor node's `connectWifi()`) rather than by manually pinning a channel number.
+- Hop 2 -- master to Django, WiFi/HTTP (this is the leg the rest of this document originally described end-to-end; it is unchanged in mechanism, only relocated to the ESP32-S3 board):
   - Physical/link: IEEE 802.11 Wi-Fi in station mode.
   - Transport: TCP/IP.
   - Application: HTTP REST POST with JSON payload.
   - Endpoint: POST http://192.168.1.100:8000/api/telemetry/submit/.
+- Return path -- Django's classification travels master -> sensor node over ESP-NOW as an `ActuatorCommand` struct, the mirror image of hop 1.
 
-### Client Request Flow (MCU -> Backend)
-1. loop() calls ensureWifi() each cycle; if disconnected, firmware performs full reconnect sequence.
-2. Sampling tick gate uses millis() against nextSampleAt; executes every SAMPLE_INTERVAL_MS (5000 ms).
-3. sampleDht() obtains humidity and temperature; invalid NAN data aborts current tick.
-4. sampleMq137() gathers 16 ADC samples on GPIO34 and averages.
-5. mqCountsToPpm() converts averaged ADC counts to NH3 PPM via resistor-divider and power-law calibration curve.
-6. edgeAiForecast() computes one-step extrapolated predicted values when ENABLE_EDGE_AI_STUB=1.
-7. transmit() builds JSON document, serializes to String body, configures HTTPClient timeout, sets Content-Type: application/json, and posts body.
-8. On HTTP 201 response, firmware deserializes response stream and extracts record.predicted_class.
-9. loop() invokes applyActuators(state) using parsed classification.
+### Sensor Node Request Flow (per 5 s tick)
+1. loop() calls ensureWifi() each cycle; if disconnected, firmware performs full reconnect sequence (needed for channel alignment and NTP, not for data delivery).
+2. Any pending ActuatorCommand relayed from the master since the last iteration is applied via applyActuators() -- checked every loop iteration, independent of the sampling cadence.
+3. Sampling tick gate uses millis() against nextSampleAt; executes every SAMPLE_INTERVAL_MS (5000 ms).
+4. sampleDht() obtains humidity and temperature; invalid NAN data aborts current tick.
+5. sampleMq137() gathers 16 ADC samples on GPIO34 and averages.
+6. currentHourMonth() reads NTP-synced wall-clock time (falling back to the last-known value if a read fails).
+7. sendSample() populates a SensorPacket and calls esp_now_send() to the master's MAC address.
+8. onDataSent() (registered callback) logs delivery failure asynchronously; no application-level retry -- the next 5 s tick supersedes a lost sample.
 
-### Payload Inspection (Exact Structure Sent by MCU)
-Outgoing JSON fields from transmit():
+### Master Node Flow (per received packet)
+1. onDataRecv() copies the incoming SensorPacket out of the ESP-NOW payload under a critical section (runs in the WiFi task context).
+2. loop() picks up the fresh packet, appends it to a 3-sample raw history and a 6-row engineered feature window (both must fill before inference starts -- see esp32s3_master/README.md's warm-up note).
+3. The TFLite Micro interpreter runs one inference producing predicted_temperature, predicted_ammonia, and predicted_spike_probability.
+4. postToDjango() builds the combined JSON record (raw + all three predictions) and POSTs it -- same StaticJsonDocument/HTTPClient pattern the single-board design used.
+5. On HTTP 201, the response's record.predicted_class is parsed and relayed back to the sensor node via esp_now_send() (relayClassificationToSensor()).
+6. On any failure (WiFi down, non-201, parse error), nothing is relayed -- the sensor node's actuators simply hold their last commanded state, the same fail-safe behavior the original single-board design had.
+
+### Payload Inspection
+
+ESP-NOW SensorPacket (sensor node -> master, binary struct, not JSON):
+- seq (uint32_t)
+- temperature (float)
+- humidity (float)
+- ammonia_ppm (float)
+- hour (uint8_t, 0-23)
+- month (uint8_t, 1-12)
+
+ESP-NOW ActuatorCommand (master -> sensor node, binary struct):
+- state (char[24], one of the four EnvironmentalState values)
+
+Outgoing JSON fields from the master's postToDjango() (unchanged contract from the original single-board transmit(), plus one new field):
 - temperature (float)
 - humidity (float)
 - ammonia_level (float)
 - predicted_temperature (float or null)
 - predicted_ammonia (float or null)
+- predicted_spike_probability (float in [0, 1] or null) -- new: the TFLite Micro classifier head's ammonia-spike probability, absent/null until the master node is linked.
 
-Example payload when prediction is valid:
+Example payload (master node, prediction populated):
 {
   "temperature": 30.25,
   "humidity": 62.10,
   "ammonia_level": 11.40,
   "predicted_temperature": 30.90,
-  "predicted_ammonia": 12.00
+  "predicted_ammonia": 12.00,
+  "predicted_spike_probability": 0.14
 }
 
-Example payload when prediction disabled/invalid:
+Example payload (master node, before its feature/history warm-up completes -- see esp32s3_master/README.md):
 {
   "temperature": 30.25,
   "humidity": 62.10,
   "ammonia_level": 11.40,
   "predicted_temperature": null,
-  "predicted_ammonia": null
+  "predicted_ammonia": null,
+  "predicted_spike_probability": null
 }
 
-### Server Response Parsing (Backend -> MCU)
+### Server Response Parsing (Backend -> Master Node)
 - Expected status code: 201 Created only.
 - Expected response envelope from Django:
   - status: "ok"
@@ -174,26 +227,32 @@ Example payload when prediction disabled/invalid:
   - HEAT_STRESS_WARNING
   - LOW_TEMP_ALERT
   - OPTIMAL_ENVIRONMENT
+- This classification is then re-sent to the sensor node as an ActuatorCommand over ESP-NOW -- the master never applies fan/heater state itself, it only relays.
 
 ### Fault Tolerance and Error Behavior
-- Wi-Fi disconnection handling:
+- Wi-Fi disconnection handling (both boards):
   - ensureWifi() checks WiFi.status().
   - If disconnected: WiFi.disconnect(true, true) then connectWifi().
   - connectWifi() retries up to WIFI_MAX_RETRIES (10) with WIFI_RETRY_MS (2000 ms).
-- Timeout handling:
-  - HTTP timeout set to HTTP_TIMEOUT_MS (4000 ms), bounding stall duration inside transmit().
-- HTTP error handling:
-  - Any status != 201 is treated as failure and logged.
-  - No in-function retry; retry naturally occurs on next 5-second sampling tick.
-- JSON parse failure handling:
-  - deserializeJson error returns failure; actuator update skipped.
-- Packet loss/server outage behavior:
-  - POST failure causes no new state application.
-  - Actuators remain at previous duty values (held state), because applyActuators() is called only on successful classified response.
-- Sensor fault handling:
+- ESP-NOW delivery handling (both hops):
+  - Send status is checked asynchronously via the registered send callback; a failure is logged, not retried -- the next 5 s tick supersedes a lost sample or a lost classification.
+  - No acknowledgment-based retry loop exists in either direction; this is a deliberate simplicity trade-off appropriate for a 5 s telemetry cadence where a single dropped packet is inconsequential.
+- Timeout handling (master node only, HTTP leg):
+  - HTTP timeout set to HTTP_TIMEOUT_MS (4000 ms), bounding stall duration inside postToDjango().
+- HTTP error handling (master node only):
+  - Any status != 201 is treated as failure and logged; no classification is relayed back for that sample.
+  - No in-function retry; retry naturally occurs on next received ESP-NOW sample.
+- JSON parse failure handling (master node only):
+  - deserializeJson error returns failure; ESP-NOW relay to the sensor node is skipped.
+- Packet loss/outage behavior:
+  - Any break in the chain (ESP-NOW sensor->master, master's WiFi/HTTP, or ESP-NOW master->sensor) results in no new actuator command reaching the sensor node.
+  - Actuators remain at previous duty values (held state), because applyActuators() only runs when a fresh ActuatorCommand arrives. This is unchanged from the original single-board design, just spread across an additional hop -- more links in the chain means more places a single sample can be lost, though the failure mode at the actuator is identical.
+- Sensor fault handling (sensor node):
   - DHT NAN -> skip tick.
   - MQ rail/open-circuit voltage guard returns 0.0 ppm instead of inf/NaN propagation.
   - NH3 output clamped to [0, 500] ppm to align backend admissible range.
+- Clock fault handling (sensor node):
+  - NTP sync failure at boot is logged but non-fatal; currentHourMonth() falls back to the last successfully-read hour/month (seeded to a neutral noon/June default on cold start) so a clock outage degrades forecast accuracy rather than stalling sampling.
 
 ## 4. Execution Flow & Logic Breakdown
 
@@ -210,7 +269,11 @@ Example payload when prediction disabled/invalid:
   - Initial duty both set to 0 to avoid startup actuator glitch.
 4. Wi-Fi connection loop and handling:
   - connectWifi() enters STA mode, disables modem sleep, begins association, retries with bounded loop.
-5. Sensor warmup/stabilization:
+5. NTP time sync:
+  - syncNtpTime() calls configTime() then attempts one getLocalTime() read (bounded by NTP_SYNC_TIMEOUT_MS) purely for a diagnostic boot-time log line; a failure here is not fatal, see currentHourMonth()'s fallback.
+6. ESP-NOW bring-up:
+  - initEspNow() registers send/recv callbacks and adds the master node (MASTER_MAC_ADDR) as a peer; setup() halts in an infinite delay loop if this fails, since nothing downstream can function without it.
+7. Sensor warmup/stabilization:
   - No explicit timed warmup state machine; first sample can run immediately after setup via nextSampleAt = millis().
   - Practical note: MQ-137 typically needs burn-in and runtime thermal stabilization externally managed.
 
@@ -219,20 +282,21 @@ Example payload when prediction disabled/invalid:
   - Uses millis() schedule check:
     - if (int32_t(now - nextSampleAt) < 0) return.
   - This signed-delta pattern is rollover-safe across millis() wrap (~49.7 days).
-2. Schedule advancement:
+2. Connectivity maintenance:
+  - ensureWifi() runs every iteration, not gated by the sample timer.
+3. Actuator relay check (also ungated by the sample timer):
+  - If g_newCommand is set (populated by the onDataRecv ESP-NOW callback), copy it out under a critical section and call applyActuators().
+4. Schedule advancement:
   - nextSampleAt = now + SAMPLE_INTERVAL_MS.
-3. Sensor sequence:
+5. Sensor sequence:
   - Read DHT22 via sampleDht(); abort tick on failure.
   - Read MQ via sampleMq137() with oversampling and conversion.
-4. Forecast sequence:
-  - edgeAiForecast() computes one-step linear extrapolation from last sample state.
-5. Network transmission sequence:
-  - transmit() serializes JSON, posts to API, parses classification.
-6. Actuator update sequence:
-  - On successful classify response only, applyActuators(state).
-  - Serial telemetry log prints live + predicted values + state.
+6. Transmission sequence:
+  - sendSample() populates a SensorPacket (including currentHourMonth()'s wall-clock fields) and calls esp_now_send() to the master.
 7. Failure branch behavior:
-  - Logs failure message and keeps previous actuator output unchanged.
+  - Logs a failure message on a local send error; actuators are unaffected by this board's own send failures (they only change in response to an incoming ActuatorCommand, or lack thereof).
+
+Forecasting and classification no longer happen on this board at all -- see the Master Node Flow above and esp32s3_master/README.md for where that logic now lives.
 
 ## 5. Exhaustive Function & Logic Index
 
@@ -303,51 +367,37 @@ Example payload when prediction disabled/invalid:
 3. Call mqCountsToPpm(sum, MQ_ADC_SAMPLES).
 4. Return computed ppm.
 
-### 5.6 static void edgeAiForecast(float tNow, float ppmNow, float& tPred, float& ppmPred, bool& valid)
-- Function Signature: static void edgeAiForecast(float tNow, float ppmNow, float& tPred, float& ppmPred, bool& valid)
+### 5.6 static void syncNtpTime() / static void currentHourMonth(uint8_t&, uint8_t&)
+- Function Signature: static void syncNtpTime(); static void currentHourMonth(uint8_t& hour, uint8_t& month)
 - Exact Job:
-  - Provide one-tick-ahead forecast values with a compile-time enable switch.
+  - Source wall-clock hour-of-day/month-of-year for the master's model features, without letting a clock fault stall sensor sampling.
 - Step-by-Step Logic:
-1. If ENABLE_EDGE_AI_STUB is enabled:
-  - If historical values are NAN (cold start): set predictions equal to current values.
-  - Else linear extrapolation:
-    - tPred = tNow + (tNow - lastTemperature)
-    - ppmPred = ppmNow + (ppmNow - lastAmmonia)
-  - Update lastTemperature and lastAmmonia with current sample.
-  - Set valid = true.
-2. If stub disabled:
-  - Mark inputs as intentionally unused.
-  - Set valid = false (payload emits null predictions).
+1. syncNtpTime() calls configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER), then getLocalTime() once with a bounded timeout purely to log success/failure at boot.
+2. currentHourMonth() calls getLocalTime() with a zero timeout (non-blocking check) on every sample tick.
+3. On success, updates and returns the static lastHour/lastMonth (seeded to 12/6 on cold start).
+4. On failure, silently returns the last-known values -- no error path, since a stale clock reading is preferable to skipping a sample.
 
-### 5.7 static bool transmit(float temperatureC, float humidityPct, float ammoniaPpm, float predTempC, float predAmmoniaPpm, bool predValid, String& outState)
-- Function Signature: static bool transmit(float temperatureC, float humidityPct, float ammoniaPpm, float predTempC, float predAmmoniaPpm, bool predValid, String& outState)
+### 5.7 static bool sendSample(float temperatureC, float humidityPct, float ammoniaPpm)
+- Function Signature: static bool sendSample(float temperatureC, float humidityPct, float ammoniaPpm)
 - Exact Job:
-  - Marshal payload, POST to API, parse response class, return success/failure and state string.
+  - Marshal a SensorPacket and hand it to the ESP-NOW stack for delivery to the master. Replaces the original transmit()'s JSON-over-HTTP responsibility with a binary-struct-over-ESP-NOW one; there is no response to parse here, since the classification comes back later, asynchronously, via onDataRecv().
 - Step-by-Step Logic:
-1. Clear outState.
-2. If Wi-Fi not connected, return false.
-3. Build StaticJsonDocument<256> with required live fields.
-4. Conditionally assign prediction fields:
-  - Numeric values if predValid true.
-  - null if predValid false.
-5. Serialize JSON into String body.
-6. Configure HTTPClient timeout and endpoint URL (API_BASE_URL + API_SUBMIT_PATH).
-7. Add Content-Type header.
-8. Execute POST and capture status code.
-9. If code != 201:
-  - Print error code and HTTP client message.
-  - Close session with http.end().
-  - Return false.
-10. Parse response stream into StaticJsonDocument<384>.
-11. Close session.
-12. If parse error, print parse message and return false.
-13. Extract outState = respDoc["record"]["predicted_class"] defaulting to empty.
-14. Return true only if outState is non-empty.
+1. Populate a SensorPacket: incrementing seq, the three live readings, and hour/month from currentHourMonth().
+2. Call esp_now_send(masterMac, ...) with the packet's raw bytes.
+3. Return true iff esp_now_send() itself queued successfully (ESP_OK) -- this reports local queuing, not remote delivery; actual delivery success/failure surfaces later via the onDataSent callback.
 
-### 5.8 static void applyActuators(const String& state)
-- Function Signature: static void applyActuators(const String& state)
+### 5.8 static void onDataSent(...) / static void onDataRecv(...)
+- Function Signature: static void onDataSent(const uint8_t* mac, esp_now_send_status_t status); static void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len)
 - Exact Job:
-  - Enforce backend classification into mutually exclusive fan/heater actuation.
+  - Asynchronous ESP-NOW callbacks, invoked from the WiFi task context (not the Arduino loop() thread).
+- Step-by-Step Logic:
+1. onDataSent(): logs a delivery-failure diagnostic if status != ESP_NOW_SEND_SUCCESS; no other action.
+2. onDataRecv(): validates the incoming length matches sizeof(ActuatorCommand); if so, memcpy's the payload into g_lastCommand and sets g_newCommand under a critical section (portENTER_CRITICAL_ISR/portEXIT_CRITICAL_ISR) so loop() can safely consume it without a torn read.
+
+### 5.9 static void applyActuators(const char* state)
+- Function Signature: static void applyActuators(const char* state)
+- Exact Job:
+  - Enforce the master-relayed classification into mutually exclusive fan/heater actuation. Logic is identical to the original single-board design; only the parameter type changed (const char* from the ActuatorCommand struct, rather than a String parsed directly out of an HTTP response body).
 - Step-by-Step Logic:
 1. Initialize fanDuty and heaterDuty to OFF.
 2. If state is CRITICAL_AMMONIA or HEAT_STRESS_WARNING:
@@ -358,10 +408,10 @@ Example payload when prediction disabled/invalid:
   - Both remain OFF.
 5. Write duty values to LEDC fan/heater channels.
 
-### 5.9 void setup()
+### 5.10 void setup()
 - Function Signature: void setup()
 - Exact Job:
-  - One-time initialization of serial, sensors, ADC, PWM, Wi-Fi, and scheduler seed.
+  - One-time initialization of serial, sensors, ADC, PWM, Wi-Fi, NTP, ESP-NOW, and scheduler seed.
 - Step-by-Step Logic:
 1. Start serial at 115200.
 2. Print boot banner.
@@ -369,17 +419,20 @@ Example payload when prediction disabled/invalid:
 4. Configure ADC resolution and attenuation.
 5. Configure and attach LEDC channels/pins.
 6. Force both actuator outputs OFF.
-7. Establish Wi-Fi connection.
-8. Seed nextSampleAt with current millis for immediate first cycle.
+7. Establish Wi-Fi connection (connectWifi()).
+8. Sync NTP time (syncNtpTime()).
+9. Bring up ESP-NOW and register the master as a peer (initEspNow()); halt in an infinite delay loop on failure.
+10. Seed nextSampleAt with current millis for immediate first cycle.
 
-### 5.10 void loop()
+### 5.11 void loop()
 - Function Signature: void loop()
 - Exact Job:
-  - Real-time cooperative control loop: maintain connectivity, sample sensors, transmit telemetry, and update actuators.
+  - Real-time cooperative control loop: maintain connectivity, apply any relayed actuator command, sample sensors, and transmit telemetry over ESP-NOW.
 - Step-by-Step Logic:
 1. ensureWifi() to maintain link.
-2. Read now = millis().
-3. If not yet sample time (signed delta negative), return quickly.
+2. Apply any pending ActuatorCommand from the master (checked every iteration, not gated by the sample timer).
+3. Read now = millis().
+4. If not yet sample time (signed delta negative), return quickly.
 4. Schedule next sample time by adding SAMPLE_INTERVAL_MS.
 5. Read DHT values; if invalid, abort tick.
 6. Read ammonia ppm via sampleMq137().
@@ -393,9 +446,9 @@ Example payload when prediction disabled/invalid:
 
 ## 6. Evaluator Defense Guide: 10 Tough Questions Teachers Will Ask
 
-1. Network: How does the board send data, and why use HTTP POST over GET or WebSockets?
+1. Network: How does data get from the sensor to Django, and why ESP-NOW for one hop and HTTP POST for the other?
 - Answer:
-  - The board uses Wi-Fi STA + TCP + HTTP POST to a REST endpoint. POST is correct semantically because each payload creates a new telemetry record server-side (non-idempotent create operation), while GET is intended for retrieval and risks caching/proxy behavior. WebSockets are optimal for continuous duplex streams but add connection lifecycle complexity and statefulness on both MCU and server; this system sends one compact sample every 5 s, so request/response POST is simpler, auditable, and sufficient.
+  - Two different jobs, two different protocols. Sensor node -> master node needs to move a small fixed-size struct between two boards a few meters apart, every 5 s, with minimal latency and no need for either board to run a full IP stack against each other -- ESP-NOW (a connectionless link directly over the WiFi radio) fits that exactly, and is simpler and lower-latency than standing up a second HTTP server on the master just to receive from the sensor node. Master node -> Django is a different job: crossing onto the LAN/internet to reach a server that already speaks HTTP, where POST is correct semantically because each payload creates a new telemetry record server-side (non-idempotent create), while GET risks caching/proxy behavior. WebSockets would suit a continuous duplex stream but add connection-lifecycle complexity neither side needs for one compact sample every 5 s.
 
 2. Concurrency: Why is non-blocking millis timing used instead of delay(), and what happens if millis overflows after 49 days?
 - Answer:
@@ -407,11 +460,11 @@ Example payload when prediction disabled/invalid:
 
 4. Data Parsing: Which library parses the incoming server JSON, and how do you prevent buffer overflow attacks or low memory issues on the MCU?
 - Answer:
-  - ArduinoJson is used with fixed-capacity StaticJsonDocument (256 bytes outgoing, 384 bytes incoming), preventing uncontrolled heap growth and reducing fragmentation risk. Parse errors are explicitly checked via DeserializationError. Only one expected field path is extracted for control action, limiting attack surface from oversized or malformed payloads.
+  - This now happens on the master node (ESP32-S3), not the sensor node: ArduinoJson is used there with fixed-capacity StaticJsonDocument (320 bytes outgoing, 384 bytes incoming), preventing uncontrolled heap growth and reducing fragmentation risk. Parse errors are explicitly checked via DeserializationError. Only one expected field path is extracted for control action, limiting attack surface from oversized or malformed payloads. The sensor node itself parses no JSON at all any more -- its two payloads (SensorPacket out, ActuatorCommand in) are fixed-size C structs copied with memcpy and a length check, which removes JSON parsing from that board's attack surface entirely.
 
-5. Reliability: What happens to the physical heaters/fans if the Wi-Fi drops or the Python backend crashes?
+5. Reliability: What happens to the physical heaters/fans if the Wi-Fi drops, the Python backend crashes, or a board goes offline?
 - Answer:
-  - On link loss, ensureWifi() initiates reconnect. On POST failure/non-201/parse failure, applyActuators() is not called, so previous actuator duty values are held. This is deterministic hold-last-state behavior. In production, a watchdog-safe policy can be added (for example, fail-safe fan ON after N consecutive failures) depending on farm safety requirements.
+  - The chain has three links now (sensor-to-master ESP-NOW, master-to-Django HTTP, master-to-sensor ESP-NOW), and a break at any one of them has the same net effect: the sensor node's applyActuators() is not called, so previous actuator duty values are held -- deterministic hold-last-state behavior, unchanged in spirit from the original single-board design. Concretely: if the master node is powered off, the sensor node keeps sampling and sending, but esp_now_send() calls will simply fail to reach a live peer and nothing comes back; if Django is down, the master's postToDjango() returns false and no ESP-NOW relay is sent; if WiFi drops on either board, ensureWifi() retries independently on each. In production, a watchdog-safe policy can be added (for example, fail-safe fan ON after N consecutive failures) depending on farm safety requirements -- not implemented here on either board.
 
 6. Sensors: How do you handle sensor noise, erratic analog readings, or floating inputs?
 - Answer:
@@ -421,22 +474,26 @@ Example payload when prediction disabled/invalid:
 - Answer:
   - ESP32 GPIO/ADC are 3.3V domain. GPIO34 ADC input must never exceed 3.3V; config comments explicitly require external scaling if MQ module output can approach 5V. MQ sensor supply Vc in model is 5.0V, but ADC pin sees conditioned voltage. Relay/MOSFET power stages for fan/heater are external and should include proper level compatibility and isolation as required by chosen modules.
 
-8. Memory: How is RAM/Flash usage managed on this microcontroller?
+8. Memory: How is RAM/Flash usage managed on these microcontrollers?
 - Answer:
-  - Key design choices are static/global objects and static JSON documents to avoid repeated dynamic allocation in the loop. Payload size is constrained. HTTP transaction object is stack-local and cleaned by http.end(). Forecast history stores only two floats. This keeps per-tick memory deterministic and fragmentation risk low.
+  - Sensor node: static/global objects throughout (no JSON documents at all now), fixed-size SensorPacket/ActuatorCommand structs, no dynamic allocation in the loop. Master node: the same StaticJsonDocument discipline the original design used for its HTTP leg, plus a large but fixed 220 KB tensor arena (kTensorArenaSize) for the TFLite Micro interpreter -- sized once at compile time, never grown at runtime, which is why the ESP32-S3 (more RAM than the classic ESP32) was chosen for this role rather than adding the model to the existing DevKit V1.
 
-9. Payload Construction: How are continuous float/integer sensor values converted into strings or JSON packets for transmission?
+9. Payload Construction: How are continuous float/integer sensor values converted for transmission?
 - Answer:
-  - Values remain numeric in the JSON tree (doc[field] = float) and are serialized by ArduinoJson via serializeJson into a String body. No manual sprintf JSON framing is used, reducing formatting errors and type coercion issues. Server-side Django decoder reads numeric JSON tokens directly into Python float validation.
+  - Sensor node -> master: no conversion at all -- a SensorPacket C struct is sent as raw bytes over ESP-NOW (memcpy on both ends), which is both simpler and smaller on the wire than JSON for a fixed, known schema. Master -> Django: values remain numeric in the JSON tree (doc[field] = float) and are serialized by ArduinoJson via serializeJson into a String body, exactly as the original single-board design did. No manual sprintf JSON framing is used on that leg, reducing formatting errors and type coercion issues; Django's decoder reads numeric JSON tokens directly into Python float validation.
 
-10. Security: How could this HTTP transmission be secured in a production environment (for example, HTTPS/TLS)?
+10. Security: How could this system be secured in a production environment?
 - Answer:
-  - Replace HTTPClient endpoint with HTTPS and a WiFiClientSecure transport, pin server certificate or CA chain, and enforce TLS version/cipher policy. Add device authentication (API key or mTLS client cert), replay protection (timestamp/nonce + HMAC), and network segmentation (VLAN/firewall). Also remove plaintext credentials from compile-time header and provision secrets through secure onboarding/NVS.
+  - Two legs, two hardening stories. ESP-NOW (both directions) supports AES-CCMP encryption via esp_now_add_peer()'s peer.encrypt/peer.lmk fields -- currently disabled (peer.encrypt = false) since this is a private/trusted LAN deployment; enabling it and provisioning a shared LMK per peer pair would be the production step. Master -> Django HTTP should be replaced with HTTPS via WiFiClientSecure, pinning the server certificate or CA chain and enforcing TLS version/cipher policy, plus device authentication (API key or mTLS client cert), replay protection (timestamp/nonce + HMAC), and network segmentation (VLAN/firewall). Both boards should also move their compile-time WiFi/MAC constants out of version-controlled headers and into secure onboarding/NVS provisioning for a real fleet deployment.
 
 ### Additional Defense Notes for Viva
 - Classification precedence is intentionally ammonia-dominant:
-  - Backend classifier evaluates ammonia > 25.0 first, then heat+humidity conjunction, then low temperature.
+  - Backend classifier evaluates ammonia > 25.0 first, then heat+humidity conjunction, then low temperature. The master node's spike-risk prediction is a separate, advisory-only signal (predicted_spike_probability) and never itself changes this precedence or the resulting predicted_class.
 - Firmware and backend state vocabularies are byte-aligned:
-  - STATE_* constants in firmware must remain identical to backend EnvironmentalState values.
-- Important current limitation to disclose clearly:
-  - On repeated communication failures, actuator policy is hold-last-state, not explicit fail-safe override; safety strategy should be reviewed for deployment.
+  - STATE_* constants in the sensor node's firmware, and the classification strings the master node relays, must remain identical to backend EnvironmentalState values.
+- ESP-NOW packet structs must stay byte-identical across both boards:
+  - SensorPacket and ActuatorCommand are defined independently in esp32/src/main.cpp and esp32s3_master/esp32s3_master.ino (no shared header, since they're built by two different toolchains). Changing field order/types in one without the other silently breaks the link -- onDataRecv()'s length check (len != sizeof(...)) will reject the mismatched packets outright, which at least fails loudly rather than silently misinterpreting bytes.
+- Important current limitations to disclose clearly:
+  - On repeated communication failures anywhere in the three-hop chain, actuator policy is hold-last-state, not explicit fail-safe override; safety strategy should be reviewed for deployment.
+  - Single sensor node, single master node only -- see esp32s3_master/README.md's "Known limitations" for what multi-node support would require.
+  - MAC addresses are paired manually at flash time (copy-paste from Serial Monitor output); there is no dynamic pairing/discovery handshake.

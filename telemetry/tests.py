@@ -109,6 +109,39 @@ class SubmitEndpointTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(PoultryTelemetry.objects.count(), 0)
 
+    def test_spike_probability_defaults_to_null_when_absent(self):
+        # Master node (ESP32-S3) not yet linked: key omitted entirely.
+        response = self._post({"temperature": 27.0, "humidity": 60.0, "ammonia_level": 5.0})
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(PoultryTelemetry.objects.get().predicted_spike_probability)
+        self.assertIsNone(response.json()["record"]["predicted_spike_probability"])
+
+    def test_spike_probability_persists_when_provided(self):
+        response = self._post({
+            "temperature": 27.0, "humidity": 60.0, "ammonia_level": 5.0,
+            "predicted_spike_probability": 0.42,
+        })
+        self.assertEqual(response.status_code, 201)
+        self.assertAlmostEqual(
+            PoultryTelemetry.objects.get().predicted_spike_probability, 0.42
+        )
+
+    def test_spike_probability_out_of_unit_interval_rejected(self):
+        response = self._post({
+            "temperature": 27.0, "humidity": 60.0, "ammonia_level": 5.0,
+            "predicted_spike_probability": 1.5,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(PoultryTelemetry.objects.count(), 0)
+
+    def test_non_numeric_spike_probability_rejected(self):
+        response = self._post({
+            "temperature": 27.0, "humidity": 60.0, "ammonia_level": 5.0,
+            "predicted_spike_probability": "high",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(PoultryTelemetry.objects.count(), 0)
+
 
 class HistoricalEndpointTests(TestCase):
     def test_returns_ascending_chronology_and_thresholds(self):
@@ -124,6 +157,7 @@ class HistoricalEndpointTests(TestCase):
         stamps = [point["timestamp"] for point in body["data"]]
         self.assertEqual(stamps, sorted(stamps))
         self.assertIn("ammonia_critical_ppm", body["thresholds"])
+        self.assertIn("ammonia_spike_risk_threshold", body["thresholds"])
 
     def test_invalid_hours_param_rejected(self):
         response = self.client.get(reverse("telemetry-historical"), {"hours": "yesterday"})

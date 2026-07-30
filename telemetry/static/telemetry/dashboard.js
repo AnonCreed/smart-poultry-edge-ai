@@ -23,6 +23,12 @@
   const CONSOLE_MAX_LINES = 200;   // Rolling buffer cap to bound DOM size.
   const API_HISTORICAL = "/api/telemetry/historical/";
 
+  // Master-node (ESP32-S3) spike-risk decision threshold. Overwritten on
+  // every poll from the API's echoed `thresholds.ammonia_spike_risk_threshold`
+  // (telemetry.classifier.AMMONIA_SPIKE_RISK_THRESHOLD) so this default is
+  // only ever used before the first successful response lands.
+  let spikeRiskThreshold = 0.21;
+
   // CSS custom properties are the single source of truth for series colors.
   const css = getComputedStyle(document.documentElement);
   const COLOR = {
@@ -43,12 +49,15 @@
     valTemp:    document.getElementById("value-temperature"),
     valHum:     document.getElementById("value-humidity"),
     valNh3:     document.getElementById("value-ammonia"),
+    valSpike:   document.getElementById("value-spike-risk"),
     // Forecast lines: muted secondary text under each primary value.
     fcTemp:     document.getElementById("forecast-temperature"),
     fcNh3:      document.getElementById("forecast-ammonia"),
+    spikeNote:  document.getElementById("spike-risk-note"),
     cardTemp:   document.getElementById("card-temperature"),
     cardHum:    document.getElementById("card-humidity"),
     cardNh3:    document.getElementById("card-ammonia"),
+    cardSpike:  document.getElementById("card-spike-risk"),
     stateBadge: document.getElementById("state-badge"),
     stateLabel: document.getElementById("state-label"),
     stateTime:  document.getElementById("state-time"),
@@ -212,6 +221,36 @@
     el.cardTemp.dataset.alert = alertForMetric(latest.predicted_class, "temperature");
     el.cardHum.dataset.alert  = alertForMetric(latest.predicted_class, "humidity");
     el.cardNh3.dataset.alert  = alertForMetric(latest.predicted_class, "ammonia");
+
+    renderSpikeRisk(latest.predicted_spike_probability);
+  }
+
+  /**
+   * The ESP32-S3 master node's TFLite Micro spike-classifier probability.
+   * Null until that board is linked (mirrors the predicted_temperature /
+   * predicted_ammonia "pending" contract). Escalates ok -> warn -> crit as
+   * the probability climbs past the calibrated threshold and twice that
+   * threshold, so the tile's alert color tracks the same cutoff the
+   * firmware and API already agree on rather than a second hardcoded value.
+   */
+  function renderSpikeRisk(probability) {
+    if (typeof probability !== "number") {
+      el.valSpike.textContent = "--.-";
+      el.spikeNote.textContent = "Master node: pending";
+      el.cardSpike.dataset.alert = "ok";
+      return;
+    }
+
+    el.valSpike.textContent = (probability * 100).toFixed(1);
+    el.spikeNote.textContent = `Threshold: ${(spikeRiskThreshold * 100).toFixed(0)}%`;
+
+    if (probability >= spikeRiskThreshold * 2) {
+      el.cardSpike.dataset.alert = "crit";
+    } else if (probability >= spikeRiskThreshold) {
+      el.cardSpike.dataset.alert = "warn";
+    } else {
+      el.cardSpike.dataset.alert = "ok";
+    }
   }
 
   function renderCharts(points, thresholds) {
@@ -249,12 +288,18 @@
       ? `${p.predicted_temperature.toFixed(1)}C` : "n/a";
     const predNh3  = (typeof p.predicted_ammonia === "number")
       ? `${p.predicted_ammonia.toFixed(1)}ppm` : "n/a";
+    // Master-node (ESP32-S3) spike probability. Omitted entirely (not "n/a")
+    // when null, matching the server logger's format exactly so the browser
+    // console and journalctl output are byte-identical.
+    const spikeSuffix = (typeof p.predicted_spike_probability === "number")
+      ? ` | SPIKE_RISK: ${Math.round(p.predicted_spike_probability * 100)}%`
+      : "";
     return (
       `[${fmtConsoleStamp(p.timestamp)}] INGESTION SUCCESS -> ` +
       `T: ${p.temperature.toFixed(1)}C (Pred: ${predTemp}) | ` +
       `RH: ${p.humidity.toFixed(1)}% | ` +
       `NH3: ${p.ammonia_level.toFixed(1)}ppm (Pred: ${predNh3}) | ` +
-      `STATE: ${meta.label}`
+      `STATE: ${meta.label}${spikeSuffix}`
     );
   }
 
@@ -348,6 +393,10 @@
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = await response.json();
+
+      if (typeof body.thresholds.ammonia_spike_risk_threshold === "number") {
+        spikeRiskThreshold = body.thresholds.ammonia_spike_risk_threshold;
+      }
 
       setLinkState("online", "Link online");
       renderCharts(body.data, body.thresholds);

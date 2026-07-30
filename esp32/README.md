@@ -1,10 +1,20 @@
-# ESP32 Edge Node -- Firmware
+# ESP32 Sensor Node -- Firmware
 
-Production-grade Arduino/ESP32 firmware for the Poultry Telemetry edge node.
-Reads DHT22 (temperature + humidity) and MQ-137 (ammonia PPM), POSTs a JSON
-payload matching the Django ingestion contract every 5 seconds, and closes
-the environmental control loop by driving the fan and heater PWM outputs
-from the classification returned by the backend.
+Production-grade Arduino/ESP32 firmware for the Poultry Telemetry sensor
+node. Reads DHT22 (temperature + humidity) and MQ-137 (ammonia PPM) every
+5 seconds and sends them over **ESP-NOW** to the ESP32-S3 master node
+(`../esp32s3_master/`), which runs the on-device forecast/spike model and
+owns the WiFi/HTTP leg to Django. The master relays Django's classification
+back over ESP-NOW so this board can still drive its own fan and heater PWM
+outputs, closing the control loop end-to-end across the two boards.
+
+This board still joins WiFi (see `include/config.h`), but only to (a) land
+on the same channel as the master -- ESP-NOW requires both peers on the
+same channel, and joining the same AP is the simplest way to guarantee that
+-- and (b) sync wall-clock time over NTP for the model's hour/month cyclic
+features. It no longer POSTs to Django directly; see
+`../esp32s3_master/README.md` for the full two-board pipeline and the MAC
+pairing procedure required before either board can talk to the other.
 
 ## Pin map (must match the KiCad schematic)
 
@@ -33,15 +43,21 @@ Two constraints are non-negotiable:
 
 ```bash
 cd esp32
-# Edit include/config.h: WIFI_SSID, WIFI_PASSWORD, API_BASE_URL (Django host IP).
+# Edit include/config.h: WIFI_SSID, WIFI_PASSWORD, MASTER_MAC_ADDR
+# (see the MAC pairing procedure in ../esp32s3_master/README.md), and
+# GMT_OFFSET_SEC for your timezone.
 pio run                 # Compile
 pio run -t upload       # Flash over USB
 pio device monitor      # Serial console at 115200 baud
 ```
 
+Flash the ESP32-S3 master (`../esp32s3_master/`) first so you have its MAC
+address to put in `MASTER_MAC_ADDR` before flashing this board.
+
 Alternatively in the Arduino IDE: open `src/main.cpp` as `main.ino` (or copy
-into a sketch with the same name as the folder), install the same three
-libraries listed in `platformio.ini`, and select "ESP32 Dev Module".
+into a sketch with the same name as the folder), install the two libraries
+listed in `platformio.ini` (ESP-NOW ships with the esp32 board package, no
+separate library needed), and select "ESP32 Dev Module".
 
 ## MQ-137 calibration
 
@@ -62,9 +78,10 @@ or, worse, miss real breaches.
 
 ## Control loop
 
-The backend classifies each incoming record and returns
-`record.predicted_class` in the response body. The firmware maps that string
-to actuator state:
+The master node POSTs each record to Django, which classifies it and
+returns `record.predicted_class`. The master relays that string back to
+this board over ESP-NOW (`ActuatorCommand`), and the firmware maps it to
+actuator state:
 
 | Classification          | Fan  | Heater |
 |-------------------------|------|--------|
@@ -76,15 +93,11 @@ to actuator state:
 The interlock (fan and heater never both on) is inherent to the
 classification -- a single state is returned per record.
 
-## Edge-AI forecast
+## Edge-AI forecast and spike-risk prediction
 
-`ENABLE_EDGE_AI_STUB = 1` (default) transmits a one-tick-ahead linear
-extrapolation in `predicted_temperature` and `predicted_ammonia`. This
-exercises the dashboard's dashed forecast lines and the console
-`(Pred: ...)` markers with realistic values while a real TFLite Micro model
-is not yet trained/deployed. Setting the flag to 0 transmits JSON null for
-those fields; the dashboard falls back to `AI Forecast: pending`.
-
-When the real model is ready, replace the body of `edgeAiForecast()` in
-`main.cpp` with a TFLite Micro inference call. The payload contract does not
-change, so no backend or dashboard updates are required at model swap-in.
+This board no longer computes a forecast itself -- the on-node linear-
+extrapolation stub from earlier versions has been superseded by the ESP32-S3
+master's real TFLite Micro model, which produces `predicted_temperature`,
+`predicted_ammonia`, and `predicted_spike_probability` from a rolling window
+of this board's raw readings. See `../esp32s3_master/README.md` for the
+model details and the spike-risk threshold.

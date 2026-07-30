@@ -54,6 +54,15 @@ class PoultryTelemetry(models.Model):
         blank=True,
         help_text="ESP32-S3 Edge-AI NH3 forecast in PPM. Null until hardware is linked.",
     )
+    predicted_spike_probability = models.FloatField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Master-node TFLite Micro classifier output in [0, 1]: probability of an "
+            "imminent ammonia spike, computed from a rolling window of sensor-node "
+            "readings relayed over ESP-NOW. Null until the ESP32-S3 master is linked."
+        ),
+    )
 
     predicted_class = models.CharField(
         max_length=32,
@@ -90,6 +99,10 @@ class PoultryTelemetry(models.Model):
             "predicted_ammonia": (
                 round(self.predicted_ammonia, 2)
                 if self.predicted_ammonia is not None else None
+            ),
+            "predicted_spike_probability": (
+                round(self.predicted_spike_probability, 4)
+                if self.predicted_spike_probability is not None else None
             ),
             "predicted_class": self.predicted_class,
         }

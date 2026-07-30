@@ -24,7 +24,8 @@ Payload structure (matches the Edge-AI-ready ingestion contract):
         "humidity": float,
         "ammonia_level": float,
         "predicted_temperature": float | null,
-        "predicted_ammonia": float | null
+        "predicted_ammonia": float | null,
+        "predicted_spike_probability": float | null
     }
 The forecast channels emulate a lightweight on-device TinyML regressor
 (short-horizon exponential extrapolation) and are enabled by default so
@@ -33,12 +34,20 @@ the dashboard's KPI forecast lines, dashed chart series, and console
 to transmit null forecasts, matching the deployment state before the
 physical ESP32-S3 inference firmware is linked.
 
+`predicted_spike_probability` emulates the ESP32-S3 master node's TFLite
+Micro spike classifier (real firmware: esp32s3_master/), which is only
+reachable over ESP-NOW from a physical sensor node. The simulator stands in
+with a logistic function of ammonia proximity to the ventilation trigger, so
+the dashboard's spike-risk tile has plausible live numbers before the
+master-node hardware is linked.
+
 Usage:
     pip install requests
     python sensor_simulator.py [--url http://127.0.0.1:8000/api/telemetry/submit/] [--no-edge-ai]
 """
 
 import argparse
+import math
 import random
 import sys
 import time
@@ -73,6 +82,13 @@ AMMONIA_ACCUMULATION_RATE = 0.55  # PPM gained per tick while fan is off
 AMMONIA_FAN_TRIGGER_PPM = 30.0   # Ventilation engages above this level
 AMMONIA_FAN_DECAY = 0.78         # Multiplicative decay per tick while venting
 AMMONIA_FAN_RELEASE_PPM = 7.0    # Fan disengages once level returns near baseline
+
+# Spike-risk emulation (stands in for the ESP32-S3 master's TFLite classifier
+# output). Logistic curve centered below the fan trigger so risk visibly
+# climbs before the ventilation cycle actually engages.
+SPIKE_RISK_CENTER_PPM = AMMONIA_FAN_TRIGGER_PPM * 0.75
+SPIKE_RISK_SCALE_PPM = 4.0
+SPIKE_RISK_NOISE_SIGMA = 0.02
 
 
 def clamp(value: float, bounds: tuple) -> float:
@@ -171,7 +187,25 @@ class VirtualSensorArray:
             # Nullable forecast channels; JSON null until edge hardware links.
             "predicted_temperature": predicted_temperature,
             "predicted_ammonia": predicted_ammonia,
+            "predicted_spike_probability": self._spike_probability(self.ammonia),
         }
+
+    # -- Master-node spike-risk emulation ---------------------------------------
+    def _spike_probability(self, ammonia: float):
+        """
+        Return a plausible stand-in for the ESP32-S3 master's TFLite Micro
+        spike-classifier probability, or None when Edge-AI emulation is off.
+
+        Logistic curve of ammonia level relative to the ventilation trigger:
+        risk rises smoothly as the accumulation cycle approaches the trigger
+        point and falls back once the simulated fan starts extracting.
+        """
+        if not self.edge_ai_enabled:
+            return None
+        x = (ammonia - SPIKE_RISK_CENTER_PPM) / SPIKE_RISK_SCALE_PPM
+        probability = 1.0 / (1.0 + math.exp(-x))
+        probability += random.gauss(0.0, SPIKE_RISK_NOISE_SIGMA)
+        return round(clamp(probability, (0.0, 1.0)), 4)
 
     # -- Edge-AI forecast emulation ---------------------------------------------
     def _edge_ai_forecast(self, temperature: float, ammonia: float):
@@ -222,12 +256,14 @@ def transmit(session: requests.Session, url: str, payload: dict) -> None:
                 f"  FCAST[T={pt:.2f} NH3={pa:.2f}]"
                 if pt is not None and pa is not None else ""
             )
+            spike = payload.get("predicted_spike_probability")
+            spike_suffix = f"  SPIKE_RISK={spike * 100:.0f}%" if spike is not None else ""
             log_event(
                 "TX OK",
                 f"T={payload['temperature']:>6.2f} C  "
                 f"RH={payload['humidity']:>6.2f} %  "
                 f"NH3={payload['ammonia_level']:>6.2f} PPM  "
-                f"CLASS={classification}{forecast}",
+                f"CLASS={classification}{forecast}{spike_suffix}",
             )
         else:
             log_event("TX REJECTED", f"HTTP {response.status_code}: {response.text[:120]}")

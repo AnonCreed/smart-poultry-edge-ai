@@ -1,25 +1,27 @@
 // ============================================================================
-// main.cpp -- Poultry Telemetry ESP32 edge-node firmware.
+// main.cpp -- Poultry Telemetry ESP32 sensor-node firmware.
 //
 // Responsibilities, in order of execution priority:
 //   1. Maintain WiFi association; reconnect with linear back-off on drop.
+//      (Needed only for channel alignment with the ESP32-S3 master and for
+//      NTP time -- see the network note in config.h. This node no longer
+//      speaks HTTP to Django; the master owns that leg.)
 //   2. Sample DHT22 (temperature, humidity) and MQ-137 (ammonia PPM) on a
-//      fixed 5 s cadence matching the dashboard's polling interval.
-//   3. Serialize a JSON payload conforming to the Django ingestion contract
-//      and POST it to /api/telemetry/submit/.
-//   4. Parse the server's classification response and drive the PWM_FAN /
-//      PWM_HEATER outputs accordingly, closing the environmental control
-//      loop end-to-end.
+//      fixed 5 s cadence.
+//   3. Send a compact binary SensorPacket over ESP-NOW to the ESP32-S3
+//      master node, which runs the TFLite Micro forecast/spike model and
+//      forwards the combined record to Django.
+//   4. Receive the resulting classification back from the master over
+//      ESP-NOW and drive the PWM_FAN / PWM_HEATER outputs accordingly,
+//      closing the environmental control loop end-to-end across two boards.
 //
-// The main loop is non-blocking; all timing is millis()-based so WiFi
-// housekeeping and future TFLite Micro inference can share the CPU without
-// starving each other.
+// The main loop is non-blocking; all timing is millis()-based.
 // ============================================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
+#include <esp_now.h>
+#include <time.h>
 #include <DHT.h>
 #include <math.h>
 
@@ -30,26 +32,50 @@
 // ----------------------------------------------------------------------------
 static DHT dht(PIN_DHT_DATA, DHT22);
 
-// Rolling state used by the Edge-AI forecast stub. Held in RAM only; a
-// reboot re-seeds from the first fresh reading, so no NVS churn.
-static float lastTemperature = NAN;
-static float lastAmmonia     = NAN;
-
 // Millis() timestamp of the last completed sample cycle. Deliberately
 // separate from FreeRTOS timers so the schedule survives temporary WiFi
 // stalls without drift accumulating on the reconnect side.
 static uint32_t nextSampleAt = 0;
+static uint32_t txSeq = 0;
 
 // ----------------------------------------------------------------------------
-// Classification vocabulary -- must remain byte-identical to the Django
-// telemetry.EnvironmentalState enum. Adding a state anywhere requires a
-// coordinated update across three surfaces: model, backend classifier,
-// and this actuator switch.
+// Wire contract shared with esp32s3_master/esp32s3_inference_receiver.ino.
+// Field order/types must stay byte-identical on both sides -- this struct
+// is copied directly out of the ESP-NOW payload with memcpy, no serializer.
 // ----------------------------------------------------------------------------
+struct SensorPacket {
+    uint32_t seq;
+    float temperature;
+    float humidity;
+    float ammonia_ppm;
+    uint8_t hour;   // 0-23, local time
+    uint8_t month;  // 1-12
+};
+
+// Classification vocabulary the master relays back -- must remain
+// byte-identical to the Django telemetry.EnvironmentalState enum.
+struct ActuatorCommand {
+    char state[24];
+};
+
 static constexpr const char* STATE_OPTIMAL  = "OPTIMAL_ENVIRONMENT";
 static constexpr const char* STATE_HEAT     = "HEAT_STRESS_WARNING";
 static constexpr const char* STATE_LOW_TEMP = "LOW_TEMP_ALERT";
 static constexpr const char* STATE_CRITICAL = "CRITICAL_AMMONIA";
+
+static uint8_t masterMac[6] = MASTER_MAC_ADDR;
+
+// Latest actuator command from the master, handed off from the ESP-NOW recv
+// callback (runs in the WiFi task context) to the main loop via a critical
+// section -- same pattern the master firmware uses for its own inbound path.
+static ActuatorCommand g_lastCommand;
+static volatile bool g_newCommand = false;
+static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// Last-known wall-clock fields, used as a fallback if NTP sync fails so the
+// model's cyclic features stay in a plausible (not pathological) range.
+static uint8_t lastHour = 12;
+static uint8_t lastMonth = 6;
 
 // ============================================================================
 // WiFi lifecycle
@@ -62,8 +88,8 @@ static void connectWifi() {
     Serial.printf("[WIFI] Associating with SSID '%s'\n", WIFI_SSID);
     for (int attempt = 0; attempt < WIFI_MAX_RETRIES; ++attempt) {
         if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("[WIFI] Link up. IP=%s RSSI=%d dBm\n",
-                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+            Serial.printf("[WIFI] Link up. IP=%s RSSI=%d dBm Channel=%d\n",
+                          WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
             return;
         }
         delay(WIFI_RETRY_MS);
@@ -77,6 +103,39 @@ static void ensureWifi() {
     Serial.println("[WIFI] Link lost -- reconnecting.");
     WiFi.disconnect(true, true);
     connectWifi();
+}
+
+/**
+ * Sync wall-clock time over NTP. Only meaningful while WiFi is associated;
+ * called once at boot and again on every reconnect since a dropped link may
+ * have let the RTC drift uncorrected for a while.
+ */
+static void syncNtpTime() {
+    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, NTP_SYNC_TIMEOUT_MS)) {
+        Serial.printf("[NTP] Synced: %04d-%02d-%02d %02d:%02d:%02d\n",
+                      timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                      timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    } else {
+        Serial.println("[NTP] Sync failed -- hour/month features will use last-known/default values.");
+    }
+}
+
+/**
+ * Read current local hour/month for the model's cyclic features. Falls back
+ * to the last successfully-read values (seeded to a neutral noon/June
+ * default) rather than propagating a hard failure, since sensor sampling
+ * must not stall on a clock read.
+ */
+static void currentHourMonth(uint8_t& hour, uint8_t& month) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 0)) {
+        lastHour = static_cast<uint8_t>(timeinfo.tm_hour);
+        lastMonth = static_cast<uint8_t>(timeinfo.tm_mon + 1);
+    }
+    hour = lastHour;
+    month = lastMonth;
 }
 
 // ============================================================================
@@ -135,91 +194,72 @@ static float sampleMq137() {
 }
 
 // ============================================================================
-// Edge-AI forecast stub
+// ESP-NOW transport
 // ============================================================================
 
 /**
- * One-tick-ahead linear extrapolation. Placeholder for the TFLite Micro
- * regressor that will run on-device once the model is trained. The payload
- * shape does not change when the real model replaces this function, so the
- * dashboard and backend need zero updates at that time.
+ * Fired by the ESP-NOW stack (WiFi task context) once the previous send
+ * completes. Diagnostic only -- failures are logged, not retried, since the
+ * next 5 s tick naturally supersedes a stale sample.
  */
-static void edgeAiForecast(float tNow, float ppmNow,
-                           float& tPred, float& ppmPred, bool& valid) {
-#if ENABLE_EDGE_AI_STUB
-    if (isnan(lastTemperature) || isnan(lastAmmonia)) {
-        // Cold start: no delta available -- forecast equals current.
-        tPred   = tNow;
-        ppmPred = ppmNow;
-    } else {
-        tPred   = tNow   + (tNow   - lastTemperature);
-        ppmPred = ppmNow + (ppmNow - lastAmmonia);
+static void onDataSent(const uint8_t* /*mac*/, esp_now_send_status_t status) {
+    if (status != ESP_NOW_SEND_SUCCESS) {
+        Serial.println("[ESPNOW] Delivery to master failed.");
     }
-    lastTemperature = tNow;
-    lastAmmonia     = ppmNow;
-    valid = true;
-#else
-    (void)tNow; (void)ppmNow; (void)tPred; (void)ppmPred;
-    valid = false;
-#endif
 }
 
-// ============================================================================
-// HTTP transmit + response handling
-// ============================================================================
-
 /**
- * Build payload, POST, and if the server accepts, apply the returned
- * classification to the actuator PWM outputs. Returns the parsed
- * classification string (into `outState`) or an empty string on any failure.
+ * Fired by the ESP-NOW stack when the master relays back a classification.
+ * Runs in the WiFi task context, so the payload is copied out under a
+ * critical section for the main loop to consume -- mirrors the pattern the
+ * master firmware uses for its own inbound sensor packets.
  */
-static bool transmit(float temperatureC, float humidityPct, float ammoniaPpm,
-                     float predTempC, float predAmmoniaPpm, bool predValid,
-                     String& outState) {
-    outState = "";
-    if (WiFi.status() != WL_CONNECTED) return false;
+static void onDataRecv(const esp_now_recv_info_t* /*info*/, const uint8_t* data, int len) {
+    if (len != sizeof(ActuatorCommand)) return;
 
-    // Serialize payload. StaticJsonDocument avoids heap fragmentation on
-    // constrained MCUs; 256 B is comfortably above worst-case size.
-    StaticJsonDocument<256> doc;
-    doc["temperature"]   = temperatureC;
-    doc["humidity"]      = humidityPct;
-    doc["ammonia_level"] = ammoniaPpm;
-    if (predValid) {
-        doc["predicted_temperature"] = predTempC;
-        doc["predicted_ammonia"]     = predAmmoniaPpm;
-    } else {
-        doc["predicted_temperature"] = nullptr;
-        doc["predicted_ammonia"]     = nullptr;
+    portENTER_CRITICAL_ISR(&g_mux);
+    memcpy(&g_lastCommand, data, sizeof(ActuatorCommand));
+    g_newCommand = true;
+    portEXIT_CRITICAL_ISR(&g_mux);
+}
+
+static bool initEspNow() {
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("[ESPNOW] Init failed.");
+        return false;
     }
+    esp_now_register_send_cb(onDataSent);
+    esp_now_register_recv_cb(onDataRecv);
 
-    String body;
-    serializeJson(doc, body);
-
-    HTTPClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    http.begin(String(API_BASE_URL) + API_SUBMIT_PATH);
-    http.addHeader("Content-Type", "application/json");
-
-    const int code = http.POST(body);
-    if (code != 201) {
-        Serial.printf("[HTTP] POST failed: %d %s\n",
-                      code, http.errorToString(code).c_str());
-        http.end();
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, masterMac, 6);
+    peer.channel = 0;  // 0 == use the current WiFi STA channel.
+    peer.encrypt = false;
+    if (esp_now_add_peer(&peer) != ESP_OK) {
+        Serial.println("[ESPNOW] Failed to register master as peer.");
         return false;
     }
 
-    // Parse response to extract predicted_class for actuator control.
-    StaticJsonDocument<384> respDoc;
-    const DeserializationError err = deserializeJson(respDoc, http.getStream());
-    http.end();
-    if (err) {
-        Serial.printf("[HTTP] Response parse error: %s\n", err.c_str());
-        return false;
-    }
+    Serial.printf("[ESPNOW] Ready. Local MAC=%s  Master peer=%02X:%02X:%02X:%02X:%02X:%02X\n",
+                  WiFi.macAddress().c_str(),
+                  masterMac[0], masterMac[1], masterMac[2],
+                  masterMac[3], masterMac[4], masterMac[5]);
+    return true;
+}
 
-    outState = respDoc["record"]["predicted_class"] | "";
-    return outState.length() > 0;
+/** Send one sample to the master. Returns false only on a local send error. */
+static bool sendSample(float temperatureC, float humidityPct, float ammoniaPpm) {
+    SensorPacket packet{};
+    packet.seq = txSeq++;
+    packet.temperature = temperatureC;
+    packet.humidity = humidityPct;
+    packet.ammonia_ppm = ammoniaPpm;
+    currentHourMonth(packet.hour, packet.month);
+
+    const esp_err_t result = esp_now_send(
+        masterMac, reinterpret_cast<const uint8_t*>(&packet), sizeof(packet)
+    );
+    return result == ESP_OK;
 }
 
 // ============================================================================
@@ -227,7 +267,7 @@ static bool transmit(float temperatureC, float humidityPct, float ammoniaPpm,
 // ============================================================================
 
 /**
- * Map the backend classification to fan/heater duty cycles.
+ * Map the master-relayed classification to fan/heater duty cycles.
  *
  * Rules (independent of the classifier's precedence -- these describe the
  * mechanical response, not the diagnostic):
@@ -239,13 +279,13 @@ static bool transmit(float temperatureC, float humidityPct, float ammoniaPpm,
  * Fan and heater are never both ON simultaneously; the interlock is
  * inherent to the classification since a single state is returned.
  */
-static void applyActuators(const String& state) {
+static void applyActuators(const char* state) {
     uint32_t fanDuty    = PWM_DUTY_OFF;
     uint32_t heaterDuty = PWM_DUTY_OFF;
 
-    if (state == STATE_CRITICAL || state == STATE_HEAT) {
+    if (strcmp(state, STATE_CRITICAL) == 0 || strcmp(state, STATE_HEAT) == 0) {
         fanDuty = PWM_DUTY_ON;
-    } else if (state == STATE_LOW_TEMP) {
+    } else if (strcmp(state, STATE_LOW_TEMP) == 0) {
         heaterDuty = PWM_DUTY_ON;
     }
 
@@ -259,7 +299,7 @@ static void applyActuators(const String& state) {
 void setup() {
     Serial.begin(115200);
     delay(50);
-    Serial.println("\n[BOOT] Poultry Telemetry edge node starting.");
+    Serial.println("\n[BOOT] Poultry Telemetry sensor node starting.");
 
     // Sensors
     dht.begin();
@@ -276,11 +316,31 @@ void setup() {
     ledcWrite(PWM_HEATER_CHANNEL, PWM_DUTY_OFF);
 
     connectWifi();
+    syncNtpTime();
+
+    if (!initEspNow()) {
+        Serial.println("[BOOT] ESP-NOW bring-up failed; halting.");
+        while (true) delay(1000);
+    }
+
     nextSampleAt = millis();  // First tick fires immediately.
 }
 
 void loop() {
     ensureWifi();
+
+    // Apply any actuator command relayed back from the master since the
+    // last loop iteration, independent of the sampling cadence below.
+    if (g_newCommand) {
+        ActuatorCommand cmd;
+        portENTER_CRITICAL(&g_mux);
+        cmd = g_lastCommand;
+        g_newCommand = false;
+        portEXIT_CRITICAL(&g_mux);
+
+        applyActuators(cmd.state);
+        Serial.printf("[RX] Master classification: %s\n", cmd.state);
+    }
 
     const uint32_t now = millis();
     if (static_cast<int32_t>(now - nextSampleAt) < 0) {
@@ -295,21 +355,11 @@ void loop() {
     }
     const float ammoniaPpm = sampleMq137();
 
-    float predTempC = 0.0f, predAmmoniaPpm = 0.0f;
-    bool  predValid = false;
-    edgeAiForecast(temperatureC, ammoniaPpm, predTempC, predAmmoniaPpm, predValid);
-
-    // -- Transmit + close the control loop -----------------------------------
-    String state;
-    const bool ok = transmit(temperatureC, humidityPct, ammoniaPpm,
-                             predTempC, predAmmoniaPpm, predValid, state);
-    if (ok) {
-        applyActuators(state);
-        Serial.printf("[TX] T=%.2fC RH=%.2f%% NH3=%.2fppm "
-                      "PredT=%.2f PredNH3=%.2f STATE=%s\n",
-                      temperatureC, humidityPct, ammoniaPpm,
-                      predTempC, predAmmoniaPpm, state.c_str());
+    // -- Transmit over ESP-NOW -------------------------------------------------
+    if (sendSample(temperatureC, humidityPct, ammoniaPpm)) {
+        Serial.printf("[TX] T=%.2fC RH=%.2f%% NH3=%.2fppm -> master\n",
+                      temperatureC, humidityPct, ammoniaPpm);
     } else {
-        Serial.println("[TX] Transmit or classification failed; actuators held.");
+        Serial.println("[TX] ESP-NOW send failed; actuators held at last state.");
     }
 }

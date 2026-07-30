@@ -47,6 +47,10 @@ OPTIONAL_PREDICTION_BOUNDS = {
     "predicted_ammonia": FIELD_BOUNDS["ammonia_level"],
 }
 
+# Master-node (ESP32-S3) spike classifier output: a bare probability, so its
+# bounds are the unit interval rather than a physical sensor envelope.
+SPIKE_PROBABILITY_BOUNDS = (0.0, 1.0)
+
 DEFAULT_WINDOW_HOURS = 24
 MAX_WINDOW_HOURS = 24 * 30  # Hard cap to bound query cost on large tables
 
@@ -110,6 +114,27 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
             )
         predictions[field] = value
 
+    # Master-node (ESP32-S3) spike-risk probability: same absent-key ==
+    # explicit-null == no-forecast contract as the regression channels above,
+    # bounded to the unit interval instead of a physical sensor envelope.
+    raw_spike = payload.get("predicted_spike_probability")
+    if raw_spike is None:
+        predictions["predicted_spike_probability"] = None
+    elif isinstance(raw_spike, bool) or not isinstance(raw_spike, (int, float)):
+        return _error(
+            f"Field 'predicted_spike_probability' must be numeric or null, "
+            f"got {type(raw_spike).__name__}."
+        )
+    else:
+        spike_value = float(raw_spike)
+        lower, upper = SPIKE_PROBABILITY_BOUNDS
+        if not (lower <= spike_value <= upper):
+            return _error(
+                f"Field 'predicted_spike_probability'={spike_value} outside "
+                f"[{lower}, {upper}]. Reading rejected."
+            )
+        predictions["predicted_spike_probability"] = spike_value
+
     # Classification remains driven exclusively by live sensor readings;
     # forecasts are advisory overlays and never alter the stored state.
     predicted = classifier.classify_environment(
@@ -127,9 +152,15 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
     def _fmt(value: float | None, suffix: str) -> str:
         return f"{value:.1f}{suffix}" if value is not None else "n/a"
 
+    spike_probability = predictions["predicted_spike_probability"]
+    spike_suffix = (
+        f" | SPIKE_RISK: {spike_probability * 100:.0f}%"
+        if spike_probability is not None else ""
+    )
+
     logger.info(
         "[%s] INGESTION SUCCESS -> "
-        "T: %.1fC (Pred: %s) | RH: %.1f%% | NH3: %.1fppm (Pred: %s) | STATE: %s",
+        "T: %.1fC (Pred: %s) | RH: %.1f%% | NH3: %.1fppm (Pred: %s) | STATE: %s%s",
         record.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
         values["temperature"],
         _fmt(predictions["predicted_temperature"], "C"),
@@ -137,6 +168,7 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
         values["ammonia_level"],
         _fmt(predictions["predicted_ammonia"], "ppm"),
         predicted,
+        spike_suffix,
     )
 
     return JsonResponse(
@@ -186,6 +218,7 @@ def historical_telemetry(request: HttpRequest) -> JsonResponse:
                 "heat_stress_temp_c": classifier.HEAT_STRESS_TEMP_C,
                 "heat_stress_humidity_pct": classifier.HEAT_STRESS_HUMIDITY_PCT,
                 "low_temp_c": classifier.LOW_TEMP_C,
+                "ammonia_spike_risk_threshold": classifier.AMMONIA_SPIKE_RISK_THRESHOLD,
             },
             "data": [record.as_payload() for record in queryset],
         }

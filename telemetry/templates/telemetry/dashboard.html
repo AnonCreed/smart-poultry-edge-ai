@@ -28,7 +28,7 @@
       <span class="topbar-mark" aria-hidden="true"></span>
       <div>
         <h1>Poultry Telemetry</h1>
-        <span class="topbar-sub">Environmental console &middot; House 01 &middot; ESP32-S3 edge node</span>
+        <span class="topbar-sub">Environmental console &middot; House 01 &middot; ESP-NOW sensor node &rarr; ESP32-S3 master</span>
       </div>
     </div>
 
@@ -114,6 +114,16 @@
         </div>
         <div class="metric-forecast metric-forecast-empty">&nbsp;</div>
         <div class="metric-sub">Classified server-side at ingestion</div>
+      </article>
+
+      <article class="card metric" id="card-spike-risk">
+        <div class="metric-top">
+          <span class="metric-name">AI spike risk</span>
+          <span class="metric-unit mono">%</span>
+        </div>
+        <div class="metric-value mono" id="value-spike-risk">--.-</div>
+        <div class="metric-forecast" id="spike-risk-note">Master node: pending</div>
+        <div class="metric-sub">Ammonia-spike forecast <span class="mono">ESP32-S3 TFLite Micro</span></div>
       </article>
     </section>
 
