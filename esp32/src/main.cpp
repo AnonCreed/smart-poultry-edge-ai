@@ -214,7 +214,7 @@ static void onDataSent(const uint8_t* /*mac*/, esp_now_send_status_t status) {
  * critical section for the main loop to consume -- mirrors the pattern the
  * master firmware uses for its own inbound sensor packets.
  */
-static void onDataRecv(const esp_now_recv_info_t* /*info*/, const uint8_t* data, int len) {
+static void onDataRecv(const uint8_t* /*mac*/, const uint8_t* data, int len) {
     if (len != sizeof(ActuatorCommand)) return;
 
     portENTER_CRITICAL_ISR(&g_mux);

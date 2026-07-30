@@ -73,7 +73,7 @@ static void ensureWifi() {
 // ----------------------------------------------------------------------------
 // ESP-NOW callbacks
 // ----------------------------------------------------------------------------
-static void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+static void onDataRecv(const uint8_t *mac_addr, const uint8_t* data, int len) {
     if (len != sizeof(SensorPacket)) return;
 
     portENTER_CRITICAL_ISR(&g_mux);
@@ -82,7 +82,7 @@ static void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int
 
     // Auto-learn sensor MAC on first packet so we can send ActuatorCommand back.
     if (!g_sensorKnown) {
-        memcpy(g_sensorMac, info->src_addr, 6);
+        memcpy(g_sensorMac, mac_addr, 6);
         g_sensorKnown = true;
     }
     portEXIT_CRITICAL_ISR(&g_mux);
@@ -132,7 +132,7 @@ static bool postToDjango(const SensorPacket& pkt, char outState[24]) {
 
     // Build JSON payload. predicted_* fields are null -- no TFLite model yet;
     // the Django API accepts null and classifies from live readings alone.
-    StaticJsonDocument<256> doc;
+    JsonDocument doc;
     doc["temperature"]          = roundf(pkt.temperature * 10.0f) / 10.0f;
     doc["humidity"]             = roundf(pkt.humidity * 10.0f) / 10.0f;
     doc["ammonia_level"]        = roundf(pkt.ammonia_ppm * 10.0f) / 10.0f;
@@ -151,7 +151,7 @@ static bool postToDjango(const SensorPacket& pkt, char outState[24]) {
 
     if (httpCode == 201) {
         // Parse classification from response.
-        StaticJsonDocument<384> resp;
+        JsonDocument resp;
         DeserializationError err = deserializeJson(resp, http.getStream());
         if (!err) {
             const char* cls = resp["record"]["predicted_class"] | "UNKNOWN";
