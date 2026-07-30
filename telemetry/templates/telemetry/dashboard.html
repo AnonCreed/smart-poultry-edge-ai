@@ -1,0 +1,176 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Poultry Telemetry - Environmental Console</title>
+
+  <!-- Typography: Inter carries the interface chrome (Linear/Grafana register);
+       IBM Plex Mono renders numeric values and the live console feed. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- Chart.js v4 UMD build, vendored locally so the console renders on
+       air-gapped farm networks. Axis labels are pre-formatted HH:MM:SS strings. -->
+  <script src="{% static 'telemetry/vendor/chart.umd.min.js' %}"></script>
+
+  <link rel="stylesheet" href="{% static 'telemetry/dashboard.css' %}">
+</head>
+<body>
+
+  <!-- ============================ TOP NAV ============================
+       Single-page tab controller. The two <section role="tabpanel">
+       elements below share the same polling loop; only one is visible at
+       a time. Tab state is client-side only. -->
+  <header class="topbar">
+    <div class="topbar-identity">
+      <span class="topbar-mark" aria-hidden="true"></span>
+      <div>
+        <h1>Poultry Telemetry</h1>
+        <span class="topbar-sub">Environmental console &middot; House 01 &middot; ESP32-S3 edge node</span>
+      </div>
+    </div>
+
+    <nav class="tabs" role="tablist" aria-label="Primary views">
+      <button class="tab" role="tab" id="tab-overview"
+              aria-controls="view-overview" aria-selected="true" data-view="overview">
+        Overview Dashboard
+      </button>
+      <button class="tab" role="tab" id="tab-logs"
+              aria-controls="view-logs" aria-selected="false" data-view="logs">
+        System Logs Feed
+      </button>
+    </nav>
+
+    <div class="topbar-controls">
+      <div class="link-pill" id="link-state" data-state="pending">
+        <span class="link-dot" aria-hidden="true"></span>
+        <span id="link-state-label">Connecting</span>
+      </div>
+      <div class="control-group">
+        <span class="control-label">Last ingest</span>
+        <span class="control-value mono" id="last-ingest">--:--:--</span>
+      </div>
+      <div class="control-group">
+        <label class="control-label" for="window-select">Window</label>
+        <select id="window-select">
+          <option value="1">1 h</option>
+          <option value="6">6 h</option>
+          <option value="24" selected>24 h</option>
+          <option value="72">72 h</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============================ OVERVIEW VIEW ============================
+       KPI cards + dual-line charts only. No auxiliary panels beneath so the
+       charts get full vertical breathing room. -->
+  <main class="layout" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
+
+    <section class="metrics-row" aria-label="Instantaneous readings">
+
+      <article class="card metric" id="card-temperature">
+        <div class="metric-top">
+          <span class="metric-name">Temperature</span>
+          <span class="metric-unit mono">degC</span>
+        </div>
+        <div class="metric-value mono" id="value-temperature">--.-</div>
+        <div class="metric-forecast" id="forecast-temperature">AI Forecast: pending</div>
+        <div class="metric-sub">Heat stress limit <span class="mono">&gt; 35.0 at RH &gt; 70%</span></div>
+      </article>
+
+      <article class="card metric" id="card-humidity">
+        <div class="metric-top">
+          <span class="metric-name">Humidity</span>
+          <span class="metric-unit mono">% RH</span>
+        </div>
+        <div class="metric-value mono" id="value-humidity">--.-</div>
+        <!-- Humidity has no Edge-AI forecast channel in the current firmware
+             contract; the placeholder keeps card heights aligned across the row. -->
+        <div class="metric-forecast metric-forecast-empty">&nbsp;</div>
+        <div class="metric-sub">Operating band <span class="mono">50 - 70%</span></div>
+      </article>
+
+      <article class="card metric" id="card-ammonia">
+        <div class="metric-top">
+          <span class="metric-name">Ammonia</span>
+          <span class="metric-unit mono">ppm NH3</span>
+        </div>
+        <div class="metric-value mono" id="value-ammonia">--.-</div>
+        <div class="metric-forecast" id="forecast-ammonia">AI Forecast: pending</div>
+        <div class="metric-sub">Safety maximum <span class="mono">25.0 ppm</span></div>
+      </article>
+
+      <article class="card metric state-card">
+        <div class="metric-top">
+          <span class="metric-name">Environmental state</span>
+          <span class="metric-unit mono" id="state-time">--:--:--</span>
+        </div>
+        <div class="state-line" id="state-badge" data-state="NONE">
+          <span class="state-dot" aria-hidden="true"></span>
+          <span id="state-label">Awaiting data</span>
+        </div>
+        <div class="metric-forecast metric-forecast-empty">&nbsp;</div>
+        <div class="metric-sub">Classified server-side at ingestion</div>
+      </article>
+    </section>
+
+    <section class="charts-row" aria-label="Historical time series">
+
+      <article class="card panel">
+        <div class="panel-head">
+          <h2>Temperature</h2>
+          <div class="legend">
+            <span class="legend-item"><span class="swatch swatch-temp-live"></span>Live sensor</span>
+            <span class="legend-item"><span class="swatch swatch-dashed swatch-temp-pred"></span>Edge-AI forecast</span>
+            <span class="legend-item"><span class="swatch swatch-dashed swatch-threshold"></span>35.0 degC threshold</span>
+          </div>
+        </div>
+        <div class="chart-wrap chart-wrap-tall"><canvas id="chart-temperature"></canvas></div>
+      </article>
+
+      <article class="card panel">
+        <div class="panel-head">
+          <h2>Ammonia concentration</h2>
+          <div class="legend">
+            <span class="legend-item"><span class="swatch swatch-nh3-live"></span>Live sensor</span>
+            <span class="legend-item"><span class="swatch swatch-dashed swatch-nh3-pred"></span>Edge-AI forecast</span>
+            <span class="legend-item"><span class="swatch swatch-dashed swatch-threshold"></span>25.0 ppm safety max</span>
+          </div>
+        </div>
+        <div class="chart-wrap chart-wrap-tall"><canvas id="chart-ammonia"></canvas></div>
+      </article>
+    </section>
+  </main>
+
+  <!-- =========================== LOGS VIEW ===========================
+       Full-page dedicated console. Hidden by default; the tab controller
+       toggles the `hidden` attribute. -->
+  <main class="layout logs-layout" id="view-logs" role="tabpanel" aria-labelledby="tab-logs" hidden>
+    <article class="card panel logs-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Live console feed</h2>
+          <p class="panel-caption">Append-only tail of every payload accepted by <span class="mono">POST /api/telemetry/submit/</span>.</p>
+        </div>
+        <div class="console-meta">
+          <span id="console-count" class="mono">0 entries</span>
+          <button id="console-pause" type="button" data-paused="false">Pause scroll</button>
+        </div>
+      </div>
+      <div class="console console-tall" id="console-feed" role="log" aria-live="polite">
+        <div class="console-line line-muted">System ready. Waiting for ingestion traffic on POST /api/telemetry/submit/ ...</div>
+      </div>
+    </article>
+  </main>
+
+  <footer class="footer">
+    <span class="mono">GET /api/telemetry/historical/?hours=N &middot; POST /api/telemetry/submit/</span>
+    <span>Refresh cadence 5 s &middot; Forecast channels nullable until ESP32-S3 link is active</span>
+  </footer>
+
+  <script src="{% static 'telemetry/dashboard.js' %}"></script>
+</body>
+</html>
