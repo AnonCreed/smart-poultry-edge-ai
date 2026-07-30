@@ -30,12 +30,11 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
-#include "tensorflow/lite/version.h"
 
 namespace {
 
 constexpr int kRawHistoryLen = 3;
-constexpr int kTensorArenaSize = 220 * 1024;
+constexpr int kTensorArenaSize = 100 * 1024;
 constexpr int kRegressionOutputSize = 2;
 
 // Wire contract shared with esp32/src/main.cpp on the sensor node. Field

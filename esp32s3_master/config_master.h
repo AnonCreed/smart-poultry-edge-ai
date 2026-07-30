@@ -17,11 +17,12 @@
 // Overwrite before flashing. Must be the SAME network the sensor node joins
 // -- ESP-NOW requires both peers on the same WiFi channel, and the simplest
 // way to guarantee that is for both boards to associate with the same AP.
-#define WIFI_SSID       "your-network-ssid"
-#define WIFI_PASSWORD   "your-network-password"
+#define WIFI_SSID       "amir123"
+#define WIFI_PASSWORD   "K@thmandu@390"
 
-// LAN address of the Django server hosting the telemetry API.
-#define API_BASE_URL    "http://192.168.1.100:8000"
+// LAN address of the Django server hosting the telemetry API (this dev
+// machine's address on the amir123 network).
+#define API_BASE_URL    "http://192.168.0.11:8000"
 #define API_SUBMIT_PATH "/api/telemetry/submit/"
 
 // HTTP timeout: keep short so a transient outage doesn't stall the receive

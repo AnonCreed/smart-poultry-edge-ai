@@ -10,9 +10,9 @@
 // ---------------------------------------------------------------------------
 // Network
 // ---------------------------------------------------------------------------
-// Overwrite before flashing production units. In a proper deployment these
-// should come from NVS provisioning (WiFiManager or ESP-IDF wifi_prov_mgr),
-// not compile-time constants -- kept here as literals for demo clarity only.
+// WiFi credentials are loaded from credentials.h (gitignored).
+// Copy esp32/include/credentials.h.example -> credentials.h and fill in
+// your SSID and password before building.
 //
 // This node no longer talks to Django directly (see HARDWARE_DOCUMENTATION.md
 // "ESP-NOW pipeline"): it joins the WiFi AP only so it (a) lands on the same
@@ -20,19 +20,19 @@
 // pull real wall-clock time via NTP for the model's hour/month cyclic
 // features. Telemetry itself goes out over ESP-NOW to MASTER_MAC_ADDR below;
 // the master owns the WiFi/HTTP leg to Django.
-#define WIFI_SSID       "your-network-ssid"
-#define WIFI_PASSWORD   "your-network-password"
+#include "credentials.h"
 
 // MAC address of the ESP32-S3 master node's WiFi station interface. Flash
 // esp32s3_master/ first and copy the "Receiver MAC: XX:XX:XX:XX:XX:XX" line
 // it prints on boot into this array (byte order matches, no reversal needed).
+// Placeholder until the master's actual boot-log MAC is read back.
 #define MASTER_MAC_ADDR { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }
 
 // NTP time source for the model's hour-of-day / month-of-year cyclic
-// features (see esp32s3_master/esp32s3_inference_receiver.ino). Set
-// GMT_OFFSET_SEC to your local standard-time offset, e.g. IST = 19800.
+// features (see esp32s3_master/esp32s3_inference_receiver.ino).
+// GMT_OFFSET_SEC = 20700 = Nepal Standard Time (UTC+5:45).
 #define NTP_SERVER            "pool.ntp.org"
-#define GMT_OFFSET_SEC         0
+#define GMT_OFFSET_SEC         20700
 #define DAYLIGHT_OFFSET_SEC    0
 #define NTP_SYNC_TIMEOUT_MS    5000
 

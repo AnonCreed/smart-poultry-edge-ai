@@ -32,6 +32,12 @@ media/
 # PlatformIO
 esp32/.pio/
 esp32/.pioenvs/
+esp32s3_master/.pio/
+esp32s3_master/.pioenvs/
+
+# Credentials -- NEVER commit these
+esp32/include/credentials.h
+esp32s3_master/include/credentials.h
 
 # VS Code
 .vscode/
