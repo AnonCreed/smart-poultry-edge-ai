@@ -8,7 +8,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from .classifier import classify_environment
-from .models import EnvironmentalState, PoultryTelemetry
+from .models import ActuatorControl, EnvironmentalState, PoultryTelemetry
 
 
 class ClassifierRuleTests(TestCase):
@@ -161,4 +161,123 @@ class HistoricalEndpointTests(TestCase):
 
     def test_invalid_hours_param_rejected(self):
         response = self.client.get(reverse("telemetry-historical"), {"hours": "yesterday"})
+        self.assertEqual(response.status_code, 400)
+
+
+class ActuatorControlEndpointTests(TestCase):
+    def test_defaults_to_auto_with_zero_manual_duty(self):
+        response = self.client.get(reverse("telemetry-control"))
+        body = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["control"]["mode"], "AUTO")
+        self.assertEqual(body["control"]["effective_fan_pct"], 0)
+        self.assertEqual(body["control"]["effective_heater_pct"], 0)
+
+    def test_auto_effective_duty_derives_from_latest_classification(self):
+        PoultryTelemetry.objects.create(
+            temperature=30.0, humidity=5.0, ammonia_level=30.0,
+            predicted_class=EnvironmentalState.CRITICAL_AMMONIA,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["effective_fan_pct"], 100)
+        self.assertEqual(control["effective_heater_pct"], 0)
+
+    def test_manual_mode_overrides_with_saved_percentages(self):
+        response = self.client.post(
+            reverse("telemetry-control"),
+            data=json.dumps({"mode": "MANUAL", "fan_speed_pct": 40, "heater_power_pct": 100}),
+            content_type="application/json",
+        )
+        body = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["control"]["effective_fan_pct"], 40)
+        self.assertEqual(body["control"]["effective_heater_pct"], 100)
+        self.assertEqual(ActuatorControl.objects.get().mode, "MANUAL")
+
+    def test_invalid_mode_rejected(self):
+        response = self.client.post(
+            reverse("telemetry-control"),
+            data=json.dumps({"mode": "TURBO"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_out_of_range_percentage_rejected(self):
+        response = self.client.post(
+            reverse("telemetry-control"),
+            data=json.dumps({"fan_speed_pct": 150}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_non_binary_heater_percentage_rejected(self):
+        # The heater is relay-switched (on/off only) -- anything other than
+        # 0 or 100 doesn't correspond to a real hardware state.
+        response = self.client.post(
+            reverse("telemetry-control"),
+            data=json.dumps({"heater_power_pct": 65}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_submit_response_echoes_effective_control(self):
+        ActuatorControl.objects.create(mode="MANUAL", fan_speed_pct=77, heater_power_pct=100)
+        response = self.client.post(
+            reverse("telemetry-submit"),
+            data=json.dumps({"temperature": 27.0, "humidity": 55.0, "ammonia_level": 4.0}),
+            content_type="application/json",
+        )
+        body = response.json()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(body["control"]["effective_fan_pct"], 77)
+        self.assertEqual(body["control"]["effective_heater_pct"], 100)
+
+
+class ExportAndReportEndpointTests(TestCase):
+    def setUp(self):
+        PoultryTelemetry.objects.create(
+            temperature=20.0, humidity=50.0, ammonia_level=5.0,
+            predicted_class=EnvironmentalState.OPTIMAL_ENVIRONMENT,
+        )
+        PoultryTelemetry.objects.create(
+            temperature=40.0, humidity=80.0, ammonia_level=30.0,
+            predicted_class=EnvironmentalState.CRITICAL_AMMONIA,
+        )
+
+    def test_export_returns_csv_with_header_and_rows(self):
+        response = self.client.get(reverse("telemetry-export"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv")
+        body = response.content.decode("utf-8")
+        lines = body.strip().splitlines()
+        self.assertEqual(lines[0].split(","), [
+            "timestamp", "temperature_c", "humidity_pct", "ammonia_ppm",
+            "predicted_temperature_c", "predicted_ammonia_ppm",
+            "predicted_spike_probability", "predicted_class",
+        ])
+        self.assertEqual(len(lines), 3)  # header + 2 records
+
+    def test_export_invalid_hours_rejected(self):
+        response = self.client.get(reverse("telemetry-export"), {"hours": "nope"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_export_invalid_date_rejected(self):
+        response = self.client.get(reverse("telemetry-export"), {"start": "not-a-date"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_report_summary_counts_and_averages(self):
+        response = self.client.get(reverse("telemetry-report"))
+        body = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["averages"]["avg_temperature"], 30.0)
+        self.assertEqual(body["state_counts"]["CRITICAL_AMMONIA"], 1)
+        self.assertEqual(body["state_counts"]["OPTIMAL_ENVIRONMENT"], 1)
+        self.assertEqual(body["state_counts"]["LOW_TEMP_ALERT"], 0)
+
+    def test_report_start_after_end_rejected(self):
+        response = self.client.get(
+            reverse("telemetry-report"), {"start": "2026-08-05", "end": "2026-08-01"}
+        )
         self.assertEqual(response.status_code, 400)

@@ -12,18 +12,21 @@ Endpoints:
                                    data hydrated client-side via the GET API)
 """
 
+import csv
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
-from django.http import HttpRequest, JsonResponse
+from django.db.models import Avg, Count, Max, Min
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from . import classifier
-from .models import PoultryTelemetry
+from .models import ActuatorControl, ActuatorMode, EnvironmentalState, FlockProfile, PoultryTelemetry
 
 # Dedicated ingestion logger. Server-side log lines mirror the front-end
 # console feed format so `journalctl -u <service>` and the browser view show
@@ -33,7 +36,7 @@ logger = logging.getLogger("telemetry.ingest")
 # Ingestion validation bounds. These are plausibility gates for sensor faults
 # (disconnected probe, I2C noise), not classification thresholds.
 FIELD_BOUNDS = {
-    "temperature": (-40.0, 85.0),   # DHT22/SHT31 physical operating envelope
+    "temperature": (-40.0, 85.0),   # Generous envelope covering DHT11 (0-50C) and SHT31-class sensors
     "humidity": (0.0, 100.0),       # Relative humidity is bounded by definition
     "ammonia_level": (0.0, 500.0),  # MQ-137 electrochemical sensing ceiling
 }
@@ -136,11 +139,19 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
         predictions["predicted_spike_probability"] = spike_value
 
     # Classification remains driven exclusively by live sensor readings;
-    # forecasts are advisory overlays and never alter the stored state.
+    # forecasts are advisory overlays and never alter the stored state. The
+    # flock profile's active thresholds default to the classifier's own
+    # fixed constants until a user has explicitly saved an age/custom
+    # profile, so ingestion behavior is unchanged out of the box.
+    profile = FlockProfile.current()
+    low_temp_c, heat_stress_temp_c = profile.active_temperature_band()
     predicted = classifier.classify_environment(
         temperature=values["temperature"],
         humidity=values["humidity"],
         ammonia_level=values["ammonia_level"],
+        temp_min_c=low_temp_c,
+        temp_max_c=heat_stress_temp_c,
+        ammonia_critical_ppm=profile.active_ammonia_critical_ppm(),
     )
 
     record = PoultryTelemetry.objects.create(
@@ -171,8 +182,19 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
         spike_suffix,
     )
 
+    # Echo the actuator control state resolved against *this* record's fresh
+    # classification, so a firmware client gets one ready-to-apply command
+    # (mode-resolved fan/heater duty) in the same round trip it already
+    # makes to submit a sample -- no separate poll of /api/telemetry/control/
+    # needed on the hot path.
+    control = ActuatorControl.current()
+
     return JsonResponse(
-        {"status": "ok", "record": record.as_payload()},
+        {
+            "status": "ok",
+            "record": record.as_payload(),
+            "control": control.as_payload(record.predicted_class),
+        },
         status=201,
     )
 
@@ -208,21 +230,300 @@ def historical_telemetry(request: HttpRequest) -> JsonResponse:
         .order_by("timestamp")
     )
 
+    # Thresholds echo whatever is *currently active* for ingestion -- the
+    # flock profile's age-derived or custom band when configured, otherwise
+    # the classifier's fixed defaults -- so the chart's threshold lines and
+    # the dashboard's sub-text never drift from what's actually classifying
+    # new rows.
+    profile = FlockProfile.current()
+    active_low_temp_c, active_heat_stress_temp_c = profile.active_temperature_band()
+
     return JsonResponse(
         {
             "status": "ok",
             "window_hours": hours,
             "count": queryset.count(),
             "thresholds": {
-                "ammonia_critical_ppm": classifier.AMMONIA_CRITICAL_PPM,
-                "heat_stress_temp_c": classifier.HEAT_STRESS_TEMP_C,
+                "ammonia_critical_ppm": profile.active_ammonia_critical_ppm(),
+                "heat_stress_temp_c": active_heat_stress_temp_c,
                 "heat_stress_humidity_pct": classifier.HEAT_STRESS_HUMIDITY_PCT,
-                "low_temp_c": classifier.LOW_TEMP_C,
+                "low_temp_c": active_low_temp_c,
                 "ammonia_spike_risk_threshold": classifier.AMMONIA_SPIKE_RISK_THRESHOLD,
+                # Static reference tables, echoed once per poll so the
+                # dashboard can do client-side lookups (live age-band
+                # preview, ammonia risk-tier label) without duplicating the
+                # husbandry reference tables in JS.
+                "ammonia_risk_levels": [
+                    {"key": key, "label": label, "min_ppm": low, "max_ppm": high}
+                    for key, label, low, high in classifier.AMMONIA_RISK_LEVELS
+                ],
+                "age_temperature_bands": [
+                    {
+                        "min_week": min_week, "max_week": max_week,
+                        "temp_min_c": temp_min, "temp_max_c": temp_max,
+                    }
+                    for min_week, max_week, temp_min, temp_max in classifier.AGE_TEMPERATURE_BANDS_C
+                ],
             },
+            "profile": profile.as_payload(),
             "data": [record.as_payload() for record in queryset],
         }
     )
+
+
+@require_http_methods(["GET", "POST"])
+@csrf_exempt  # Dashboard-only endpoint, but kept exempt for parity with submit/; CSRF isn't meaningful for same-origin JSON fetch here.
+def flock_profile(request: HttpRequest) -> JsonResponse:
+    """
+    GET  -> current flock profile (age, custom overrides, active thresholds).
+    POST -> update age_weeks / use_custom_thresholds / custom_* fields.
+             Saving from here is what flips `is_configured` on, switching
+             ingestion from the classifier's fixed defaults to this profile.
+    """
+    profile = FlockProfile.current()
+
+    if request.method == "GET":
+        return JsonResponse({"status": "ok", "profile": profile.as_payload()})
+
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _error("Request body must be valid UTF-8 JSON.")
+    if not isinstance(payload, dict):
+        return _error("Payload root must be a JSON object.")
+
+    if "age_weeks" in payload:
+        raw = payload["age_weeks"]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 1:
+            return _error("Field 'age_weeks' must be a positive number.")
+        profile.age_weeks = int(raw)
+
+    if "use_custom_thresholds" in payload:
+        raw = payload["use_custom_thresholds"]
+        if not isinstance(raw, bool):
+            return _error("Field 'use_custom_thresholds' must be a boolean.")
+        profile.use_custom_thresholds = raw
+
+    for field in ("custom_temp_min_c", "custom_temp_max_c", "custom_ammonia_critical_ppm"):
+        if field not in payload:
+            continue
+        raw = payload[field]
+        if raw is None:
+            setattr(profile, field, None)
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return _error(f"Field '{field}' must be numeric or null.")
+        setattr(profile, field, float(raw))
+
+    if (
+        profile.use_custom_thresholds
+        and profile.custom_temp_min_c is not None
+        and profile.custom_temp_max_c is not None
+        and profile.custom_temp_min_c >= profile.custom_temp_max_c
+    ):
+        return _error("custom_temp_min_c must be less than custom_temp_max_c.")
+
+    # Any explicit save is what opts ingestion into profile-driven
+    # thresholds -- a fresh deployment's untouched profile keeps the
+    # classifier's original fixed defaults.
+    profile.is_configured = True
+    profile.save()
+
+    return JsonResponse({"status": "ok", "profile": profile.as_payload()})
+
+
+@require_http_methods(["GET", "POST"])
+@csrf_exempt  # Dashboard-only endpoint, kept exempt for parity with profile/.
+def actuator_control(request: HttpRequest) -> JsonResponse:
+    """
+    GET  -> current actuator control state, plus the effective fan/heater
+             duty that's actually in force right now (AUTO-derived from the
+             latest classification, or the MANUAL fields verbatim).
+    POST -> update mode / fan_speed_pct / heater_power_pct. Switching to
+             MANUAL immediately pins fan/heater duty to the saved percentages
+             on the next ingestion round trip (see submit_telemetry's
+             embedded `control` block); switching back to AUTO resumes the
+             classifier-driven mapping with no further action needed.
+    """
+    control = ActuatorControl.current()
+    latest = PoultryTelemetry.objects.order_by("-timestamp").first()
+    latest_state = latest.predicted_class if latest else None
+
+    if request.method == "GET":
+        return JsonResponse({"status": "ok", "control": control.as_payload(latest_state)})
+
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _error("Request body must be valid UTF-8 JSON.")
+    if not isinstance(payload, dict):
+        return _error("Payload root must be a JSON object.")
+
+    if "mode" in payload:
+        raw_mode = payload["mode"]
+        if raw_mode not in ActuatorMode.values:
+            return _error(f"Field 'mode' must be one of {list(ActuatorMode.values)}.")
+        control.mode = raw_mode
+
+    if "fan_speed_pct" in payload:
+        raw = payload["fan_speed_pct"]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return _error("Field 'fan_speed_pct' must be numeric.")
+        value = int(raw)
+        if not (0 <= value <= 100):
+            return _error(f"Field 'fan_speed_pct'={value} must be within [0, 100].")
+        control.fan_speed_pct = value
+
+    if "heater_power_pct" in payload:
+        raw = payload["heater_power_pct"]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return _error("Field 'heater_power_pct' must be numeric.")
+        value = int(raw)
+        # The heater is switched by a relay (see hardware/esp32/include/config.h
+        # PIN_HEATER_RELAY) -- there's no PWM/variable power on this leg like
+        # there is for the fan, so only fully-off or fully-on is a real state.
+        if value not in (0, 100):
+            return _error(f"Field 'heater_power_pct'={value} must be 0 (off) or 100 (on) -- the heater is relay-switched, no variable power.")
+        control.heater_power_pct = value
+
+    control.save()
+    return JsonResponse({"status": "ok", "control": control.as_payload(latest_state)})
+
+
+def _parse_range_boundary(raw: str, *, end_of_day: bool):
+    """Parse a `start`/`end` query param as either a full ISO datetime or a
+    bare date (YYYY-MM-DD), returning a timezone-aware datetime or None on a
+    malformed string. A bare date resolves to that day's start/end so
+    `start=2026-08-01&end=2026-08-01` covers the whole day inclusively."""
+    parsed = parse_datetime(raw)
+    if parsed is None:
+        date_only = parse_date(raw)
+        if date_only is None:
+            return None
+        time_component = datetime.max.time().replace(microsecond=0) if end_of_day else datetime.min.time()
+        parsed = datetime.combine(date_only, time_component)
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed
+
+
+def _windowed_queryset(request: HttpRequest):
+    """
+    Shared time-range resolution for /export/ and /report/: explicit
+    `start`/`end` query params take precedence; otherwise falls back to the
+    same trailing `hours` window semantics as /historical/.
+
+    Returns (queryset, None) on success, or (None, JsonResponse) on a
+    malformed query param -- callers should return the second element as-is.
+    """
+    start_raw = request.GET.get("start")
+    end_raw = request.GET.get("end")
+
+    if start_raw or end_raw:
+        start = _parse_range_boundary(start_raw, end_of_day=False) if start_raw else None
+        end = _parse_range_boundary(end_raw, end_of_day=True) if end_raw else None
+        if start_raw and start is None:
+            return None, _error(f"Query param 'start' is not a valid date/datetime: '{start_raw}'.")
+        if end_raw and end is None:
+            return None, _error(f"Query param 'end' is not a valid date/datetime: '{end_raw}'.")
+        if start and end and start > end:
+            return None, _error("Query param 'start' must not be after 'end'.")
+
+        queryset = PoultryTelemetry.objects.order_by("timestamp")
+        if start:
+            queryset = queryset.filter(timestamp__gte=start)
+        if end:
+            queryset = queryset.filter(timestamp__lte=end)
+        return queryset, None
+
+    raw_hours = request.GET.get("hours", str(DEFAULT_WINDOW_HOURS))
+    try:
+        hours = float(raw_hours)
+    except ValueError:
+        return None, _error(f"Query param 'hours' must be numeric, got '{raw_hours}'.")
+    if not (0 < hours <= MAX_WINDOW_HOURS):
+        return None, _error(f"Query param 'hours' must be in (0, {MAX_WINDOW_HOURS}].")
+
+    cutoff = timezone.now() - timedelta(hours=hours)
+    queryset = PoultryTelemetry.objects.filter(timestamp__gte=cutoff).order_by("timestamp")
+    return queryset, None
+
+
+@require_GET
+def export_telemetry(request: HttpRequest) -> HttpResponse:
+    """
+    CSV export of telemetry history.
+
+    Query params (either style, `start`/`end` takes precedence if given):
+        hours (optional float, default 24): trailing window, as /historical/.
+        start / end (optional ISO date or datetime): explicit inclusive range.
+    """
+    queryset, error_response = _windowed_queryset(request)
+    if error_response is not None:
+        return error_response
+
+    response = HttpResponse(content_type="text/csv")
+    filename = f"poultry-telemetry-{timezone.now():%Y%m%d-%H%M%S}.csv"
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+    writer = csv.writer(response)
+    writer.writerow([
+        "timestamp", "temperature_c", "humidity_pct", "ammonia_ppm",
+        "predicted_temperature_c", "predicted_ammonia_ppm",
+        "predicted_spike_probability", "predicted_class",
+    ])
+    for record in queryset.iterator():
+        writer.writerow([
+            record.timestamp.isoformat(),
+            record.temperature,
+            record.humidity,
+            record.ammonia_level,
+            record.predicted_temperature if record.predicted_temperature is not None else "",
+            record.predicted_ammonia if record.predicted_ammonia is not None else "",
+            record.predicted_spike_probability if record.predicted_spike_probability is not None else "",
+            record.predicted_class,
+        ])
+    return response
+
+
+@require_GET
+def report_summary(request: HttpRequest) -> JsonResponse:
+    """
+    Aggregate summary over the same `hours` or `start`/`end` window as
+    /export/, for the dashboard's Reports tab: record count, min/avg/max per
+    sensor channel, and a count per classification state.
+    """
+    queryset, error_response = _windowed_queryset(request)
+    if error_response is not None:
+        return error_response
+
+    aggregates = queryset.aggregate(
+        avg_temperature=Avg("temperature"), min_temperature=Min("temperature"), max_temperature=Max("temperature"),
+        avg_humidity=Avg("humidity"), min_humidity=Min("humidity"), max_humidity=Max("humidity"),
+        avg_ammonia_level=Avg("ammonia_level"), min_ammonia_level=Min("ammonia_level"), max_ammonia_level=Max("ammonia_level"),
+    )
+    state_counts_raw = dict(
+        queryset.values_list("predicted_class").annotate(count=Count("id")).order_by()
+    )
+
+    first_record = queryset.first()
+    last_record = queryset.last()
+
+    return JsonResponse({
+        "status": "ok",
+        "count": queryset.count(),
+        "range": {
+            "start": first_record.timestamp.isoformat() if first_record else None,
+            "end": last_record.timestamp.isoformat() if last_record else None,
+        },
+        "averages": {
+            key: (round(value, 2) if value is not None else None)
+            for key, value in aggregates.items()
+        },
+        "state_counts": {
+            state: state_counts_raw.get(state, 0) for state in EnvironmentalState.values
+        },
+    })
 
 
 def dashboard(request: HttpRequest):

@@ -6,14 +6,16 @@
 //      (Needed only for channel alignment with the ESP32-S3 master and for
 //      NTP time -- see the network note in config.h. This node no longer
 //      speaks HTTP to Django; the master owns that leg.)
-//   2. Sample DHT22 (temperature, humidity) and MQ-137 (ammonia PPM) on a
+//   2. Sample DHT11 (temperature, humidity) and MQ-137 (ammonia PPM) on a
 //      fixed 5 s cadence.
 //   3. Send a compact binary SensorPacket over ESP-NOW to the ESP32-S3
 //      master node, which runs the TFLite Micro forecast/spike model and
 //      forwards the combined record to Django.
-//   4. Receive the resulting classification back from the master over
-//      ESP-NOW and drive the PWM_FAN / PWM_HEATER outputs accordingly,
-//      closing the environmental control loop end-to-end across two boards.
+//   4. Receive fan_pwm/heater_pwm bytes back from the master over ESP-NOW
+//      (both fully computed there, including any dashboard MANUAL override)
+//      and apply them: fan (PWM speed) and PTC heater (active-LOW relay,
+//      ON/OFF only), closing the environmental control loop end-to-end
+//      across two boards.
 //
 // The main loop is non-blocking; all timing is millis()-based.
 // ============================================================================
@@ -30,7 +32,7 @@
 // ----------------------------------------------------------------------------
 // Peripheral objects
 // ----------------------------------------------------------------------------
-static DHT dht(PIN_DHT_DATA, DHT22);
+static DHT dht(PIN_DHT_DATA, DHT11);
 
 // Millis() timestamp of the last completed sample cycle. Deliberately
 // separate from FreeRTOS timers so the schedule survives temporary WiFi
@@ -54,14 +56,21 @@ struct SensorPacket {
 
 // Classification vocabulary the master relays back -- must remain
 // byte-identical to the Django telemetry.EnvironmentalState enum.
+//
+// fan_pwm is a 0-255 PWM duty target computed on the master from its
+// MLP-predicted NH3 error (or a dashboard MANUAL override %) -- applied to
+// the fan verbatim. heater_pwm is a 0-255 byte computed on the master from
+// the classification (LOW_TEMP_ALERT -> 255, else 0), or a dashboard MANUAL
+// override -- this board's heater is a plain relay, so it's only ever
+// thresholded at >0. `state` itself is no longer used for actuation on this
+// board (kept for logging/diagnostics) -- both fan and heater decisions are
+// now fully computed on the master and just applied here. See
+// applyActuators().
 struct ActuatorCommand {
     char state[24];
+    uint8_t fan_pwm;
+    uint8_t heater_pwm;  // NEW
 };
-
-static constexpr const char* STATE_OPTIMAL  = "OPTIMAL_ENVIRONMENT";
-static constexpr const char* STATE_HEAT     = "HEAT_STRESS_WARNING";
-static constexpr const char* STATE_LOW_TEMP = "LOW_TEMP_ALERT";
-static constexpr const char* STATE_CRITICAL = "CRITICAL_AMMONIA";
 
 static uint8_t masterMac[6] = MASTER_MAC_ADDR;
 
@@ -143,7 +152,7 @@ static void currentHourMonth(uint8_t& hour, uint8_t& month) {
 // ============================================================================
 
 /**
- * Read DHT22. The library returns NAN on checksum failure or if polled
+ * Read DHT11. The library returns NAN on checksum failure or if polled
  * faster than the sensor's 500 ms internal refresh; both cases signal an
  * invalid tick to the caller.
  */
@@ -267,30 +276,30 @@ static bool sendSample(float temperatureC, float humidityPct, float ammoniaPpm) 
 // ============================================================================
 
 /**
- * Map the master-relayed classification to fan/heater duty cycles.
+ * Apply the master-computed fan_pwm/heater_pwm bytes to the fan/heater
+ * outputs. Both decisions (including the heater's classification check and
+ * any dashboard MANUAL override) are made entirely on the master now -- this
+ * board just applies whatever it's told, with no local reference to `state`:
+ *   fan_pwm    -> fan PWM duty (proportional, real speed control)
+ *   heater_pwm -> heater relay ON iff nonzero, OFF otherwise (active-LOW
+ *                 relay -- no speed target)
  *
- * Rules (independent of the classifier's precedence -- these describe the
- * mechanical response, not the diagnostic):
- *   CRITICAL_AMMONIA    -> fan ON, heater OFF (ventilate)
- *   HEAT_STRESS_WARNING -> fan ON, heater OFF (cool by exhaust)
- *   LOW_TEMP_ALERT      -> heater ON, fan OFF
- *   OPTIMAL_ENVIRONMENT -> both OFF
- *
- * Fan and heater are never both ON simultaneously; the interlock is
- * inherent to the classification since a single state is returned.
+ * NOTE: fan and heater are NOT interlocked -- both bytes are independent, so
+ * e.g. a nonzero MANUAL fan override alongside a nonzero heater_pwm (MANUAL
+ * or LOW_TEMP_ALERT-driven) will run the fan and energize the heater relay
+ * at once. If that combination is unsafe for the physical setup, enforce it
+ * explicitly (either server-side, or by forcing fan_pwm to 0 here whenever
+ * heaterOn).
  */
-static void applyActuators(const char* state) {
-    uint32_t fanDuty    = PWM_DUTY_OFF;
-    uint32_t heaterDuty = PWM_DUTY_OFF;
+static void applyActuators(uint8_t fan_pwm, uint8_t heater_pwm) {
+    const bool heaterOn = (heater_pwm > 0);
+    digitalWrite(PIN_HEATER_RELAY, heaterOn ? HEATER_RELAY_ON : HEATER_RELAY_OFF);
 
-    if (strcmp(state, STATE_CRITICAL) == 0 || strcmp(state, STATE_HEAT) == 0) {
-        fanDuty = PWM_DUTY_ON;
-    } else if (strcmp(state, STATE_LOW_TEMP) == 0) {
-        heaterDuty = PWM_DUTY_ON;
-    }
-
-    ledcWrite(PWM_FAN_CHANNEL,    fanDuty);
-    ledcWrite(PWM_HEATER_CHANNEL, heaterDuty);
+    // Hard power cutoff, independent of the PWM duty's own speed-target
+    // semantics (see PIN_FAN_ENABLE comment in config.h). Gates the fan's
+    // actual power; PWM_FAN_CHANNEL below still carries the speed target.
+    digitalWrite(PIN_FAN_ENABLE, fan_pwm > 0 ? HIGH : LOW);
+    ledcWrite(PWM_FAN_CHANNEL, fan_pwm);
 }
 
 // ============================================================================
@@ -306,14 +315,21 @@ void setup() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);  // 0..3.3 V range on GPIO34.
 
-    // PWM peripherals for fan and heater. Attach BEFORE writing duty so the
-    // first control cycle doesn't glitch the MOSFET gates high.
-    ledcSetup(PWM_FAN_CHANNEL,    PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
-    ledcSetup(PWM_HEATER_CHANNEL, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
-    ledcAttachPin(PIN_PWM_FAN,    PWM_FAN_CHANNEL);
-    ledcAttachPin(PIN_PWM_HEATER, PWM_HEATER_CHANNEL);
-    ledcWrite(PWM_FAN_CHANNEL,    PWM_DUTY_OFF);
-    ledcWrite(PWM_HEATER_CHANNEL, PWM_DUTY_OFF);
+    // Fan PWM peripheral. Attach BEFORE writing duty so the first control
+    // cycle doesn't glitch the MOSFET gate high.
+    ledcSetup(PWM_FAN_CHANNEL, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
+    ledcAttachPin(PIN_PWM_FAN, PWM_FAN_CHANNEL);
+    ledcWrite(PWM_FAN_CHANNEL, PWM_DUTY_OFF);
+
+    // Fan hard-cutoff pin -- set LOW (fan de-energized) before anything
+    // else runs, same "don't glitch on" precaution as the PWM line above.
+    pinMode(PIN_FAN_ENABLE, OUTPUT);
+    digitalWrite(PIN_FAN_ENABLE, LOW);
+
+    // Heater relay -- active-LOW module, so OFF is HIGH. Set before anything
+    // else runs so the relay doesn't glitch energized on boot.
+    pinMode(PIN_HEATER_RELAY, OUTPUT);
+    digitalWrite(PIN_HEATER_RELAY, HEATER_RELAY_OFF);
 
     connectWifi();
     syncNtpTime();
@@ -338,8 +354,9 @@ void loop() {
         g_newCommand = false;
         portEXIT_CRITICAL(&g_mux);
 
-        applyActuators(cmd.state);
-        Serial.printf("[RX] Master classification: %s\n", cmd.state);
+        applyActuators(cmd.fan_pwm, cmd.heater_pwm);
+        Serial.printf("[RX] Master classification: %s  fan_pwm=%u  heater_pwm=%u\n",
+                      cmd.state, cmd.fan_pwm, cmd.heater_pwm);
     }
 
     const uint32_t now = millis();

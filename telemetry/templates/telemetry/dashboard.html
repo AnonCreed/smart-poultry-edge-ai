@@ -5,11 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Poultry Telemetry - Environmental Console</title>
 
-  <!-- Typography: Inter carries the interface chrome (Linear/Grafana register);
-       IBM Plex Mono renders numeric values and the live console feed. -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <!-- Bootstrap 5, vendored locally (same reasoning as Chart.js below: the
+       console needs to render on air-gapped farm networks with no CDN
+       access). Stock components/utilities only -- no custom theme. -->
+  <link rel="stylesheet" href="{% static 'telemetry/vendor/bootstrap.min.css' %}">
 
   <!-- Chart.js v4 UMD build, vendored locally so the console renders on
        air-gapped farm networks. Axis labels are pre-formatted HH:MM:SS strings. -->
@@ -17,44 +16,20 @@
 
   <link rel="stylesheet" href="{% static 'telemetry/dashboard.css' %}">
 </head>
-<body>
+<body class="bg-body-tertiary">
 
-  <!-- ============================ TOP NAV ============================
-       Single-page tab controller. The two <section role="tabpanel">
-       elements below share the same polling loop; only one is visible at
-       a time. Tab state is client-side only. -->
-  <header class="topbar">
-    <div class="topbar-identity">
-      <span class="topbar-mark" aria-hidden="true"></span>
-      <div>
-        <h1>Poultry Telemetry</h1>
-        <span class="topbar-sub">Environmental console &middot; House 01 &middot; ESP-NOW sensor node &rarr; ESP32-S3 master</span>
-      </div>
-    </div>
+  <!-- ============================ TOP NAV ============================ -->
+  <nav class="navbar navbar-expand-lg bg-white border-bottom sticky-top">
+    <div class="container-fluid">
+      <span class="navbar-brand fw-semibold mb-0">Poultry Telemetry</span>
+      <span class="text-muted small d-none d-md-inline">Environmental console &middot; House 01 &middot; ESP-NOW sensor node &rarr; ESP32-S3 master</span>
 
-    <nav class="tabs" role="tablist" aria-label="Primary views">
-      <button class="tab" role="tab" id="tab-overview"
-              aria-controls="view-overview" aria-selected="true" data-view="overview">
-        Overview Dashboard
-      </button>
-      <button class="tab" role="tab" id="tab-logs"
-              aria-controls="view-logs" aria-selected="false" data-view="logs">
-        System Logs Feed
-      </button>
-    </nav>
-
-    <div class="topbar-controls">
-      <div class="link-pill" id="link-state" data-state="pending">
-        <span class="link-dot" aria-hidden="true"></span>
-        <span id="link-state-label">Connecting</span>
-      </div>
-      <div class="control-group">
-        <span class="control-label">Last ingest</span>
-        <span class="control-value mono" id="last-ingest">--:--:--</span>
-      </div>
-      <div class="control-group">
-        <label class="control-label" for="window-select">Window</label>
-        <select id="window-select">
+      <div class="d-flex align-items-center gap-3 ms-auto">
+        <span class="badge rounded-pill" id="link-state" data-state="pending">
+          <span id="link-state-label">Connecting</span>
+        </span>
+        <span class="text-muted small">Last ingest <span class="font-monospace text-body" id="last-ingest">--:--:--</span></span>
+        <select id="window-select" class="form-select form-select-sm" style="width: auto;" aria-label="Time window">
           <option value="1">1 h</option>
           <option value="6">6 h</option>
           <option value="24" selected>24 h</option>
@@ -62,138 +37,411 @@
         </select>
       </div>
     </div>
-  </header>
+  </nav>
 
-  <!-- ============================ OVERVIEW VIEW ============================
-       KPI cards + dual-line charts only. No auxiliary panels beneath so the
-       charts get full vertical breathing room. -->
-  <main class="layout" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
+  <div class="container-fluid py-3">
 
-    <section class="metrics-row" aria-label="Instantaneous readings">
+    <!-- Single-page tab controller, backed by Bootstrap's tab component
+         (data-bs-toggle="tab"): switching panes is handled by bootstrap.bundle.js,
+         no custom show/hide JS needed. All three panes stay mounted so the
+         5 s poll loop keeps feeding the console tail even while another tab
+         is active. -->
+    <ul class="nav nav-tabs mb-3" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="tab-overview" data-bs-toggle="tab" data-bs-target="#view-overview"
+                type="button" role="tab" aria-controls="view-overview" aria-selected="true">
+          Overview Dashboard
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-logs" data-bs-toggle="tab" data-bs-target="#view-logs"
+                type="button" role="tab" aria-controls="view-logs" aria-selected="false">
+          System Logs Feed
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-reports" data-bs-toggle="tab" data-bs-target="#view-reports"
+                type="button" role="tab" aria-controls="view-reports" aria-selected="false">
+          Reports
+        </button>
+      </li>
+    </ul>
 
-      <article class="card metric" id="card-temperature">
-        <div class="metric-top">
-          <span class="metric-name">Temperature</span>
-          <span class="metric-unit mono">degC</span>
-        </div>
-        <div class="metric-value mono" id="value-temperature">--.-</div>
-        <div class="metric-forecast" id="forecast-temperature">AI Forecast: pending</div>
-        <div class="metric-sub">Heat stress limit <span class="mono">&gt; 35.0 at RH &gt; 70%</span></div>
-      </article>
+    <div class="tab-content">
 
-      <article class="card metric" id="card-humidity">
-        <div class="metric-top">
-          <span class="metric-name">Humidity</span>
-          <span class="metric-unit mono">% RH</span>
-        </div>
-        <div class="metric-value mono" id="value-humidity">--.-</div>
-        <!-- Humidity has no Edge-AI forecast channel in the current firmware
-             contract; the placeholder keeps card heights aligned across the row. -->
-        <div class="metric-forecast metric-forecast-empty">&nbsp;</div>
-        <div class="metric-sub">Operating band <span class="mono">50 - 70%</span></div>
-      </article>
+      <!-- ============================ OVERVIEW VIEW ============================ -->
+      <div class="tab-pane fade show active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
 
-      <article class="card metric" id="card-ammonia">
-        <div class="metric-top">
-          <span class="metric-name">Ammonia</span>
-          <span class="metric-unit mono">ppm NH3</span>
-        </div>
-        <div class="metric-value mono" id="value-ammonia">--.-</div>
-        <div class="metric-forecast" id="forecast-ammonia">AI Forecast: pending</div>
-        <div class="metric-sub">Safety maximum <span class="mono">25.0 ppm</span></div>
-      </article>
-
-      <article class="card metric state-card">
-        <div class="metric-top">
-          <span class="metric-name">Environmental state</span>
-          <span class="metric-unit mono" id="state-time">--:--:--</span>
-        </div>
-        <div class="state-line" id="state-badge" data-state="NONE">
-          <span class="state-dot" aria-hidden="true"></span>
-          <span id="state-label">Awaiting data</span>
-        </div>
-        <div class="metric-forecast metric-forecast-empty">&nbsp;</div>
-        <div class="metric-sub">Classified server-side at ingestion</div>
-      </article>
-
-      <article class="card metric" id="card-spike-risk">
-        <div class="metric-top">
-          <span class="metric-name">AI spike risk</span>
-          <span class="metric-unit mono">%</span>
-        </div>
-        <div class="metric-value mono" id="value-spike-risk">--.-</div>
-        <div class="metric-forecast" id="spike-risk-note">Master node: pending</div>
-        <div class="metric-sub">Ammonia-spike forecast <span class="mono">ESP32-S3 TFLite Micro</span></div>
-      </article>
-    </section>
-
-    <section class="charts-row" aria-label="Historical time series">
-
-      <article class="card panel">
-        <div class="panel-head">
-          <h2>Temperature</h2>
-          <div class="legend">
-            <span class="legend-item"><span class="swatch swatch-temp-live"></span>Live sensor</span>
-            <span class="legend-item"><span class="swatch swatch-dashed swatch-temp-pred"></span>Edge-AI forecast</span>
-            <span class="legend-item"><span class="swatch swatch-dashed swatch-threshold"></span>35.0 degC threshold</span>
+        <!-- ========================= STATE HERO =========================
+             The one thing an operator should read first. Pulled out of the
+             metrics grid so it doesn't compete for attention with four
+             equal-weight cards; color comes entirely from #state-badge's
+             data-state (see dashboard.css). -->
+        <div class="card mb-3 state-hero" id="state-badge" data-state="NONE">
+          <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div class="d-flex align-items-center gap-3">
+              <span class="state-dot" aria-hidden="true"></span>
+              <div>
+                <div class="state-hero-eyebrow">Environmental state</div>
+                <div class="fs-4 fw-semibold" id="state-label">Awaiting data</div>
+              </div>
+            </div>
+            <div class="small state-hero-eyebrow">Classified at ingestion &middot; <span class="font-monospace" id="state-time">--:--:--</span></div>
           </div>
         </div>
-        <div class="chart-wrap chart-wrap-tall"><canvas id="chart-temperature"></canvas></div>
-        <div class="chart-scroll-bar">
-          <button id="chart-prev" type="button" class="chart-scroll-btn" title="Scroll older">&#8592; Older</button>
-          <span class="chart-scroll-label">Window:</span>
-          <select id="chart-window-select" class="chart-window-select">
-            <option value="50">50 pts</option>
-            <option value="100">100 pts</option>
-            <option value="200" selected>200 pts</option>
-            <option value="500">500 pts</option>
-            <option value="0">All</option>
-          </select>
-          <button id="chart-next" type="button" class="chart-scroll-btn" title="Scroll newer">Newer &#8594;</button>
-          <button id="chart-latest" type="button" class="chart-scroll-btn chart-scroll-btn-accent" title="Jump to latest">&#9654; Latest</button>
-        </div>
-      </article>
 
-      <article class="card panel">
-        <div class="panel-head">
-          <h2>Ammonia concentration</h2>
-          <div class="legend">
-            <span class="legend-item"><span class="swatch swatch-nh3-live"></span>Live sensor</span>
-            <span class="legend-item"><span class="swatch swatch-dashed swatch-nh3-pred"></span>Edge-AI forecast</span>
-            <span class="legend-item"><span class="swatch swatch-dashed swatch-threshold"></span>25.0 ppm safety max</span>
+        <!-- ========================= SETTINGS (collapsed) =========================
+             Flock profile + actuator control are configuration, not primary
+             content -- collapsed by default so Overview opens on live data;
+             expand to change age/thresholds or fan/heater mode. -->
+        <div class="accordion mb-3" id="settings-accordion">
+          <div class="accordion-item">
+            <h2 class="accordion-header">
+              <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#settings-collapse" aria-expanded="false" aria-controls="settings-collapse">
+                Settings <span class="text-muted small ms-2">Flock profile &amp; fan/heater actuator control</span>
+              </button>
+            </h2>
+            <div id="settings-collapse" class="accordion-collapse collapse" data-bs-parent="#settings-accordion">
+              <div class="accordion-body">
+
+                <!-- ---- Flock profile ----
+                     Age input drives the age-appropriate temperature band (husbandry
+                     reference Table 4-2); "Use custom thresholds" lets the operator
+                     override the derived band and the ammonia critical cutoff outright.
+                     Saving here is what switches ingestion classification away from the
+                     classifier's fixed defaults (see FlockProfile.is_configured). -->
+                <div aria-label="Flock age & threshold profile">
+                  <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                    <h3 class="h6 mb-0">Flock profile</h3>
+                    <span class="small text-muted" id="profile-status"></span>
+                  </div>
+
+                  <div class="row g-3 align-items-end">
+                    <div class="col-6 col-md-2">
+                      <label class="form-label small text-muted mb-1" for="profile-age">Chick age (weeks)</label>
+                      <input type="number" id="profile-age" class="form-control form-control-sm" min="1" max="52" step="1" value="1">
+                    </div>
+
+                    <div class="col-6 col-md-2">
+                      <div class="small text-muted mb-1">Age-derived band</div>
+                      <div class="font-monospace" id="profile-age-band">32.0 - 35.0 degC</div>
+                    </div>
+
+                    <div class="col-12 col-md-3 form-check pt-4">
+                      <input type="checkbox" class="form-check-input" id="profile-use-custom">
+                      <label class="form-check-label small" for="profile-use-custom">Use custom thresholds instead</label>
+                    </div>
+
+                    <div class="col-6 col-md-2" data-custom-field hidden>
+                      <label class="form-label small text-muted mb-1" for="profile-temp-min">Custom temp min</label>
+                      <input type="number" id="profile-temp-min" class="form-control form-control-sm" step="0.1" placeholder="degC">
+                    </div>
+                    <div class="col-6 col-md-2" data-custom-field hidden>
+                      <label class="form-label small text-muted mb-1" for="profile-temp-max">Custom temp max</label>
+                      <input type="number" id="profile-temp-max" class="form-control form-control-sm" step="0.1" placeholder="degC">
+                    </div>
+                    <div class="col-6 col-md-2" data-custom-field hidden>
+                      <label class="form-label small text-muted mb-1" for="profile-ammonia-crit">Custom NH3 critical</label>
+                      <input type="number" id="profile-ammonia-crit" class="form-control form-control-sm" step="0.1" placeholder="ppm">
+                    </div>
+
+                    <div class="col-6 col-md-1">
+                      <button type="button" id="profile-apply" class="btn btn-primary btn-sm">Apply</button>
+                    </div>
+                  </div>
+                </div>
+
+                <hr class="my-4">
+
+                <!-- ---- Actuator control ----
+                     AUTO mirrors the sensor node's classification-driven fan/heater
+                     mapping; MANUAL lets the operator pin fan speed and heater state
+                     directly. Fan is real PWM (0-100% slider); heater is relay-switched,
+                     on/off only, no variable power. Effective duty (what's actually
+                     applied right now) is always shown regardless of mode, so AUTO's
+                     derived duty is visible too, not just the manual controls. -->
+                <div aria-label="Fan and heater actuator control">
+                  <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                    <h3 class="h6 mb-0">Actuator control</h3>
+                    <span class="small text-muted" id="control-status"></span>
+                  </div>
+
+                  <div class="row g-3 align-items-end">
+                    <div class="col-6 col-md-2">
+                      <div class="small text-muted mb-1">Mode</div>
+                      <div class="btn-group" role="group" aria-label="Actuator mode">
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="control-mode-auto" data-mode="AUTO" aria-pressed="true">Auto</button>
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="control-mode-manual" data-mode="MANUAL" aria-pressed="false">Manual</button>
+                      </div>
+                    </div>
+
+                    <div class="col-12 col-md-3">
+                      <label class="form-label small text-muted mb-1" for="control-fan">Fan speed</label>
+                      <div class="d-flex align-items-center gap-2">
+                        <input type="range" class="form-range" id="control-fan" min="0" max="100" step="5" value="0">
+                        <span class="font-monospace small" id="control-fan-value">0%</span>
+                      </div>
+                    </div>
+
+                    <div class="col-12 col-md-3">
+                      <label class="form-label small text-muted mb-1" for="control-heater">Heater</label>
+                      <div class="d-flex align-items-center gap-2">
+                        <!-- Relay-switched, not PWM -- on/off only, no variable power. -->
+                        <div class="form-check form-switch mb-0">
+                          <input type="checkbox" class="form-check-input" id="control-heater">
+                        </div>
+                        <span class="font-monospace small" id="control-heater-value">OFF</span>
+                      </div>
+                    </div>
+
+                    <div class="col-6 col-md-1">
+                      <button type="button" id="control-apply" class="btn btn-primary btn-sm">Apply</button>
+                    </div>
+
+                    <div class="col-6 col-md-3">
+                      <div class="small text-muted mb-1">Effective right now</div>
+                      <div class="font-monospace" id="control-effective">Fan 0% &middot; Heater OFF</div>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
           </div>
         </div>
-        <div class="chart-wrap chart-wrap-tall"><canvas id="chart-ammonia"></canvas></div>
-      </article>
-    </section>
-  </main>
 
-  <!-- =========================== LOGS VIEW ===========================
-       Full-page dedicated console. Hidden by default; the tab controller
-       toggles the `hidden` attribute. -->
-  <main class="layout logs-layout" id="view-logs" role="tabpanel" aria-labelledby="tab-logs" hidden>
-    <article class="card panel logs-panel">
-      <div class="panel-head">
-        <div>
-          <h2>Live console feed</h2>
-          <p class="panel-caption">Append-only tail of every payload accepted by <span class="mono">POST /api/telemetry/submit/</span>.</p>
+        <!-- ========================= METRICS =========================
+             Two lines of substance per card (value + one status line);
+             everything else lives in the settings accordion or the state
+             hero above instead of stacking a third/fourth line here. -->
+        <div class="row row-cols-1 row-cols-sm-2 row-cols-lg-4 g-3 mb-2" aria-label="Instantaneous readings">
+
+          <div class="col">
+            <div class="card h-100" id="card-temperature">
+              <div class="card-body">
+                <div class="d-flex justify-content-between text-muted small mb-1">
+                  <span>Temperature</span>
+                  <span class="font-monospace">degC</span>
+                </div>
+                <div class="fs-3 font-monospace" id="value-temperature">--.-</div>
+                <div class="small text-muted" id="forecast-temperature">AI Forecast: pending</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="card h-100" id="card-humidity">
+              <div class="card-body">
+                <div class="d-flex justify-content-between text-muted small mb-1">
+                  <span>Humidity</span>
+                  <span class="font-monospace">% RH</span>
+                </div>
+                <div class="fs-3 font-monospace" id="value-humidity">--.-</div>
+                <div class="small text-muted">Operating band 50 - 70%</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="card h-100" id="card-ammonia">
+              <div class="card-body">
+                <div class="d-flex justify-content-between text-muted small mb-1">
+                  <span>Ammonia</span>
+                  <span class="font-monospace">ppm NH3</span>
+                </div>
+                <div class="fs-3 font-monospace" id="value-ammonia">--.-</div>
+                <div class="d-flex justify-content-between align-items-center small text-muted">
+                  <span id="forecast-ammonia">AI Forecast: pending</span>
+                  <span class="d-flex align-items-center gap-1" id="ammonia-risk" data-risk="">
+                    <span class="risk-dot" aria-hidden="true"></span>
+                    <span id="ammonia-risk-label">Risk: --</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col">
+            <div class="card h-100" id="card-spike-risk">
+              <div class="card-body">
+                <div class="d-flex justify-content-between text-muted small mb-1">
+                  <span>AI spike risk</span>
+                  <span class="font-monospace">%</span>
+                </div>
+                <div class="fs-3 font-monospace" id="value-spike-risk">--.-</div>
+                <div class="small text-muted" id="spike-risk-note">Master node: pending</div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="console-meta">
-          <span id="console-count" class="mono">0 entries</span>
-          <button id="console-pause" type="button" data-paused="false">Pause scroll</button>
+
+        <!-- Thresholds referenced by the metric cards above and the chart legends
+             below -- kept as plain text once here rather than repeated per card. -->
+        <p class="small text-muted mb-3">
+          Heat stress limit &gt; <span class="font-monospace" id="temp-heat-limit-value">35.0</span>&deg;C at RH &gt; 70%
+          &middot; Ammonia safety maximum <span class="font-monospace"><span id="ammonia-safety-max-value">25.0</span> ppm</span>
+        </p>
+
+        <!-- ========================= CHARTS ========================= -->
+        <div class="row g-3" aria-label="Historical time series">
+
+          <div class="col-lg-6">
+            <div class="card">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                  <h2 class="h6 mb-0">Temperature</h2>
+                  <div class="d-flex gap-3 small text-muted">
+                    <span><span class="swatch swatch-temp-live"></span>Live sensor</span>
+                    <span><span class="swatch swatch-dashed swatch-temp-pred"></span>Edge-AI forecast</span>
+                    <span><span class="swatch swatch-dashed swatch-threshold"></span>35.0 degC threshold</span>
+                  </div>
+                </div>
+                <div class="chart-wrap chart-wrap-tall"><canvas id="chart-temperature"></canvas></div>
+                <div class="d-flex align-items-center gap-2 flex-wrap border-top pt-2 mt-2">
+                  <button id="chart-prev" type="button" class="btn btn-outline-secondary btn-sm" title="Scroll older">&#8592; Older</button>
+                  <span class="text-muted small">Window:</span>
+                  <select id="chart-window-select" class="form-select form-select-sm" style="width: auto;">
+                    <option value="50">50 pts</option>
+                    <option value="100">100 pts</option>
+                    <option value="200" selected>200 pts</option>
+                    <option value="500">500 pts</option>
+                    <option value="0">All</option>
+                  </select>
+                  <button id="chart-next" type="button" class="btn btn-outline-secondary btn-sm" title="Scroll newer">Newer &#8594;</button>
+                  <button id="chart-latest" type="button" class="btn btn-primary btn-sm" title="Jump to latest">&#9654; Latest</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-lg-6">
+            <div class="card">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                  <h2 class="h6 mb-0">Ammonia concentration</h2>
+                  <div class="d-flex gap-3 small text-muted">
+                    <span><span class="swatch swatch-nh3-live"></span>Live sensor</span>
+                    <span><span class="swatch swatch-dashed swatch-nh3-pred"></span>Edge-AI forecast</span>
+                    <span><span class="swatch swatch-dashed swatch-threshold"></span>25.0 ppm safety max</span>
+                  </div>
+                </div>
+                <div class="chart-wrap chart-wrap-tall"><canvas id="chart-ammonia"></canvas></div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="console console-tall" id="console-feed" role="log" aria-live="polite">
-        <div class="console-line line-muted">System ready. Waiting for ingestion traffic on POST /api/telemetry/submit/ ...</div>
-      </div>
-    </article>
-  </main>
 
-  <footer class="footer">
-    <span class="mono">GET /api/telemetry/historical/?hours=N &middot; POST /api/telemetry/submit/</span>
-    <span>Refresh cadence 5 s &middot; Forecast channels nullable until ESP32-S3 link is active</span>
+      <!-- =========================== LOGS VIEW =========================== -->
+      <div class="tab-pane fade" id="view-logs" role="tabpanel" aria-labelledby="tab-logs">
+        <div class="card">
+          <div class="card-body d-flex flex-column">
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
+              <div>
+                <h2 class="h6 mb-1">Live console feed</h2>
+                <p class="text-muted small mb-0">Append-only tail of every payload accepted by <span class="font-monospace">POST /api/telemetry/submit/</span>.</p>
+              </div>
+              <div class="d-flex align-items-center gap-2">
+                <span id="console-count" class="font-monospace small text-muted">0 entries</span>
+                <button id="console-pause" type="button" class="btn btn-outline-secondary btn-sm" data-paused="false">Pause scroll</button>
+              </div>
+            </div>
+            <div class="console console-tall" id="console-feed" role="log" aria-live="polite">
+              <div class="console-line line-muted">System ready. Waiting for ingestion traffic on POST /api/telemetry/submit/ ...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- =========================== REPORTS VIEW ===========================
+           Date-range (or quick hours) summary + CSV export. Independent of the
+           5 s poll loop -- report generation is on-demand via its own button. -->
+      <div class="tab-pane fade" id="view-reports" role="tabpanel" aria-labelledby="tab-reports">
+        <div class="card">
+          <div class="card-body">
+            <div class="mb-3">
+              <h2 class="h6 mb-1">Historical reports</h2>
+              <p class="text-muted small mb-0">Summarize a time window, then export the same window as CSV.</p>
+            </div>
+
+            <div class="row g-3 align-items-end mb-2">
+              <div class="col-auto">
+                <label class="form-label small text-muted mb-1" for="report-start">Start date</label>
+                <input type="date" id="report-start" class="form-control form-control-sm">
+              </div>
+              <div class="col-auto">
+                <label class="form-label small text-muted mb-1" for="report-end">End date</label>
+                <input type="date" id="report-end" class="form-control form-control-sm">
+              </div>
+              <div class="col-auto">
+                <label class="form-label small text-muted mb-1" for="report-hours">or quick window</label>
+                <select id="report-hours" class="form-select form-select-sm">
+                  <option value="">Use dates above</option>
+                  <option value="24">Last 24 h</option>
+                  <option value="72">Last 72 h</option>
+                  <option value="168">Last 7 d</option>
+                  <option value="720">Last 30 d</option>
+                </select>
+              </div>
+              <div class="col-auto">
+                <button type="button" id="report-generate" class="btn btn-primary btn-sm">Generate report</button>
+              </div>
+              <div class="col-auto">
+                <button type="button" id="report-download" class="btn btn-outline-primary btn-sm">Download CSV</button>
+              </div>
+              <div class="col-auto">
+                <span class="small text-muted" id="report-status"></span>
+              </div>
+            </div>
+
+            <div id="report-summary" hidden>
+              <div class="row row-cols-1 row-cols-sm-2 row-cols-lg-4 g-3 mb-3" aria-label="Summary statistics">
+                <div class="col">
+                  <div class="border rounded p-2 h-100">
+                    <div class="small text-muted">Records</div>
+                    <div class="font-monospace" id="report-count">--</div>
+                  </div>
+                </div>
+                <div class="col">
+                  <div class="border rounded p-2 h-100">
+                    <div class="small text-muted">Temperature (min / avg / max)</div>
+                    <div class="font-monospace" id="report-temp">-- / -- / -- degC</div>
+                  </div>
+                </div>
+                <div class="col">
+                  <div class="border rounded p-2 h-100">
+                    <div class="small text-muted">Humidity (min / avg / max)</div>
+                    <div class="font-monospace" id="report-humidity">-- / -- / -- %</div>
+                  </div>
+                </div>
+                <div class="col">
+                  <div class="border rounded p-2 h-100">
+                    <div class="small text-muted">Ammonia (min / avg / max)</div>
+                    <div class="font-monospace" id="report-ammonia">-- / -- / -- ppm</div>
+                  </div>
+                </div>
+              </div>
+
+              <table class="table table-sm table-striped align-middle" id="report-state-table">
+                <thead>
+                  <tr><th>Classification</th><th>Count</th></tr>
+                </thead>
+                <tbody id="report-state-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="container-fluid text-muted small py-3 border-top mt-3">
+    <span class="font-monospace">GET /api/telemetry/historical/?hours=N &middot; POST /api/telemetry/submit/</span>
+    <span class="ms-2">Refresh cadence 5 s &middot; Forecast channels nullable until ESP32-S3 link is active</span>
   </footer>
 
+  <!-- Bootstrap's JS bundle (includes Popper) drives the tab component above. -->
+  <script src="{% static 'telemetry/vendor/bootstrap.bundle.min.js' %}"></script>
   <script src="{% static 'telemetry/dashboard.js' %}"></script>
 </body>
 </html>

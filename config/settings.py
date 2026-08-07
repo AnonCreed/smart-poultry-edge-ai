@@ -19,7 +19,12 @@ SECRET_KEY = "dev-only-insecure-key-rotate-before-deployment"
 
 DEBUG = True
 
-ALLOWED_HOSTS = ["127.0.0.1", "localhost", "192.168.0.11"]
+# Dev-only project (see SECRET_KEY above) served on a local/farm LAN whose
+# address changes with whatever WiFi network it's on -- rather than hardcode
+# an IP that breaks every time the network changes, accept any Host header
+# while DEBUG is on. Tighten this to explicit hostnames before any real
+# deployment.
+ALLOWED_HOSTS = ["*"] if DEBUG else []
 
 INSTALLED_APPS = [
     "django.contrib.admin",

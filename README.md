@@ -4,9 +4,10 @@ Production-grade, API-driven telemetry dashboard for a smart poultry environment
 Django backend, Edge-AI-ready JSON REST API, server-side environmental classifier,
 a two-board ESP-NOW hardware pipeline (ESP32 sensor node + ESP32-S3 master node
 running an on-device TFLite Micro forecast/spike model), a standalone sensor
-simulator for development without hardware, and a refined developer-tool
-dashboard (deep zinc dark mode, dual-line forecast charts, live console feed;
-Chart.js vendored locally for air-gapped operation).
+simulator for development without hardware, and a standard Bootstrap 5
+dashboard (dual-line forecast charts, actuator control, live console feed,
+historical reports/CSV export; Bootstrap and Chart.js are both vendored
+locally for air-gapped operation).
 
 ## Architecture
 
@@ -25,15 +26,15 @@ Physical hardware replaces the simulator with a two-board pipeline (the
 Django/dashboard side above is unchanged either way):
 
 ```
-esp32/ (DevKit V1, sensor node)  --ESP-NOW-->  esp32s3_master/ (ESP32-S3, master node)
-   DHT22 + MQ-137 + fan/heater                     TFLite Micro forecast + spike model
+hardware/esp32/ (DevKit V1, sensor node)  --ESP-NOW-->  hardware/esp32s3_master/ (ESP32-S3, master node)
+   DHT11 + MQ-137 + fan/heater                     TFLite Micro forecast + spike model
               ^                                              |
               `------------ ESP-NOW (classification) <-------'  --WiFi/HTTP--> /api/telemetry/submit/
 ```
 
 The master node is the only board that talks to Django; the sensor node only
 ever exchanges fixed-size binary structs with the master over ESP-NOW. See
-`esp32/README.md` and `esp32s3_master/README.md` for the full pipeline,
+`hardware/esp32/README.md` and `hardware/esp32s3_master/README.md` for the full pipeline,
 wiring, and the MAC-address pairing procedure the two boards need before
 they can talk to each other.
 
@@ -44,8 +45,8 @@ they can talk to each other.
 | API views (submit / historical) + dashboard shell | `telemetry/views.py` |
 | URL map | `telemetry/urls.py`, `config/urls.py` |
 | Virtual sensor client (dev/demo, no hardware needed) | `sensor_simulator.py` |
-| ESP32 sensor-node firmware (DHT22 + MQ-137, ESP-NOW, actuator loop) | `esp32/src/main.cpp`, `esp32/include/config.h` |
-| ESP32-S3 master-node firmware (ESP-NOW receive, TFLite Micro inference, WiFi/HTTP to Django) | `esp32s3_master/esp32s3_master.ino`, `esp32s3_master/config_master.h` |
+| ESP32 sensor-node firmware (DHT11 + MQ-137, ESP-NOW, actuator loop) | `hardware/esp32/src/main.cpp`, `hardware/esp32/include/config.h` |
+| ESP32-S3 master-node firmware (ESP-NOW receive, TFLite Micro inference, WiFi/HTTP to Django) | `hardware/esp32s3_master/src/main.cpp`, `hardware/esp32s3_master/include/config.h` |
 | Dashboard template | `telemetry/templates/telemetry/dashboard.html` |
 | Console stylesheet / client runtime | `telemetry/static/telemetry/dashboard.css`, `dashboard.js` |
 | Unit tests (classifier + API + forecast + spike-risk contracts) | `telemetry/tests.py` |
@@ -100,9 +101,18 @@ Terminal 1 — backend and dashboard:
 ```bash
 pip install -r requirements.txt
 python manage.py migrate
-python manage.py runserver
-# Dashboard: http://127.0.0.1:8000/
+python manage.py runserver 0.0.0.0:8000
+# Dashboard (this machine):  http://127.0.0.1:8000/
+# Dashboard (other devices, e.g. a phone on the same WiFi): http://<this-machine's-LAN-IP>:8000/
 ```
+
+Binding `0.0.0.0` (not the default `127.0.0.1`) matters if you're using the
+physical ESP32-S3 master node -- it needs to reach this over WiFi, and it
+finds the LAN IP itself via UDP broadcast discovery (see
+`hardware/esp32s3_master/README.md`), so there's no IP to hardcode on either
+side. `ALLOWED_HOSTS` is left open (`"*"`) in `config/settings.py` for the
+same reason -- this is a dev-only server, never expose it beyond a trusted
+LAN.
 
 Terminal 2 — virtual sensor:
 ```bash
@@ -136,25 +146,26 @@ ordering/threshold contracts.
 Two firmware projects ship the physical pipeline; both must be flashed and
 paired (by MAC address) for the hardware to work end-to-end.
 
-- **`esp32/`** -- ESP32 DevKit V1 sensor node. Reads DHT22 on GPIO4 and
+- **`hardware/esp32/`** -- ESP32 DevKit V1 sensor node. Reads DHT11 on GPIO4 and
   MQ-137 on GPIO34 every 5 s, and sends the readings over **ESP-NOW** to the
-  master node (no HTTP, no JSON on this board). Drives fan (GPIO32) and
-  heater (GPIO33) PWM outputs from the classification the master relays
-  back. See `esp32/README.md` for the pin map and MQ-137 calibration
+  master node (no HTTP, no JSON on this board). Drives an ON/OFF fan relay
+  (GPIO32) and an ON/OFF heater relay (GPIO25) from the classification the
+  master relays back. See `hardware/esp32/README.md` for the pin map and
+  MQ-137 calibration
   procedure.
-- **`esp32s3_master/`** -- ESP32-S3 master node. Receives sensor readings
+- **`hardware/esp32s3_master/`** -- ESP32-S3 master node. Receives sensor readings
   over ESP-NOW, runs an on-device TFLite Micro model to forecast the next
   temperature/ammonia reading and an ammonia-spike probability, then POSTs
   the combined record to Django using the same JSON contract the Python
   simulator uses. Relays Django's classification back to the sensor node
-  over ESP-NOW. See `esp32s3_master/README.md` for the model details, the
+  over ESP-NOW. See `hardware/esp32s3_master/README.md` for the model details, the
   Arduino IDE flashing steps, and the MAC-pairing procedure required before
   either board can talk to the other.
 
 Quickstart (flash the master first -- you need its printed MAC address to
 configure the sensor node):
 ```bash
-cd esp32s3_master
+cd hardware/esp32s3_master
 # Arduino IDE: install libraries per README.md, edit config_master.h
 # (WIFI_SSID, WIFI_PASSWORD, API_BASE_URL, SENSOR_NODE_MAC_ADDR),
 # then upload esp32s3_master.ino and note the printed "Receiver MAC".
@@ -165,7 +176,7 @@ cd ../esp32
 pio run                 # Compile
 pio run -t upload       # Flash over USB
 pio device monitor      # Serial diagnostics at 115200 baud
-# Copy this board's printed MAC back into esp32s3_master/config_master.h's
+# Copy this board's printed MAC back into hardware/esp32s3_master/config_master.h's
 # SENSOR_NODE_MAC_ADDR and reflash the master.
 ```
 

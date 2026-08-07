@@ -30,14 +30,15 @@ media/
 .env.*
 
 # PlatformIO
-esp32/.pio/
-esp32/.pioenvs/
-esp32s3_master/.pio/
-esp32s3_master/.pioenvs/
+hardware/esp32/.pio/
+hardware/esp32/.pioenvs/
+hardware/esp32s3_master/.pio/
+hardware/esp32s3_master/.pioenvs/
 
 # Credentials -- NEVER commit these
-esp32/include/credentials.h
-esp32s3_master/include/credentials.h
+hardware/esp32/include/credentials.h
+hardware/esp32s3_master/include/credentials.h
+hardware/esp32s3_master/credentials.h
 
 # VS Code
 .vscode/

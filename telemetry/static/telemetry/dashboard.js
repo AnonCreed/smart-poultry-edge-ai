@@ -22,6 +22,10 @@
   const POLL_INTERVAL_MS = 5000;
   const CONSOLE_MAX_LINES = 200;   // Rolling buffer cap to bound DOM size.
   const API_HISTORICAL = "/api/telemetry/historical/";
+  const API_PROFILE = "/api/telemetry/profile/";
+  const API_CONTROL = "/api/telemetry/control/";
+  const API_REPORT = "/api/telemetry/report/";
+  const API_EXPORT = "/api/telemetry/export/";
 
   // Chart scroll state: all historical points kept in memory, only a window
   // slice rendered to Chart.js so the canvas stays readable regardless of
@@ -36,6 +40,15 @@
   // (telemetry.classifier.AMMONIA_SPIKE_RISK_THRESHOLD) so this default is
   // only ever used before the first successful response lands.
   let spikeRiskThreshold = 0.21;
+
+  // Reference tables echoed by the historical endpoint (Table 4-1 / Table
+  // 4-2) -- kept client-side so the age-band and ammonia-risk lookups used
+  // for live preview don't need a round trip per keystroke.
+  let ammoniaRiskLevels = [];
+  let ageTemperatureBands = [];
+  let profileFormInitialized = false;   // Don't let the 5s poll clobber an in-progress edit.
+  let controlFormInitialized = false;   // Same guard, for the actuator control panel.
+  let selectedControlMode = "AUTO";     // Locally-selected mode, committed on Apply.
 
   // CSS custom properties are the single source of truth for series colors.
   const css = getComputedStyle(document.documentElement);
@@ -72,12 +85,43 @@
     consoleFeed:  document.getElementById("console-feed"),
     consoleCount: document.getElementById("console-count"),
     consolePause: document.getElementById("console-pause"),
-    // Tab controller wiring: two buttons -> two mutually-exclusive views.
-    tabs:       Array.from(document.querySelectorAll("[role='tab']")),
-    views: {
-      overview: document.getElementById("view-overview"),
-      logs:     document.getElementById("view-logs"),
-    },
+    heatLimitValue:  document.getElementById("temp-heat-limit-value"),
+    ammoniaMaxValue: document.getElementById("ammonia-safety-max-value"),
+    ammoniaRisk:      document.getElementById("ammonia-risk"),
+    ammoniaRiskLabel: document.getElementById("ammonia-risk-label"),
+    // Flock profile controls.
+    profileAge:        document.getElementById("profile-age"),
+    profileAgeBand:    document.getElementById("profile-age-band"),
+    profileUseCustom:  document.getElementById("profile-use-custom"),
+    profileTempMin:    document.getElementById("profile-temp-min"),
+    profileTempMax:    document.getElementById("profile-temp-max"),
+    profileAmmoniaCrit: document.getElementById("profile-ammonia-crit"),
+    profileApply:      document.getElementById("profile-apply"),
+    profileStatus:     document.getElementById("profile-status"),
+    profileCustomFields: Array.from(document.querySelectorAll("[data-custom-field]")),
+    // Actuator control controls.
+    controlModeAuto:    document.getElementById("control-mode-auto"),
+    controlModeManual:  document.getElementById("control-mode-manual"),
+    controlFan:         document.getElementById("control-fan"),
+    controlFanValue:    document.getElementById("control-fan-value"),
+    controlHeater:      document.getElementById("control-heater"),
+    controlHeaterValue: document.getElementById("control-heater-value"),
+    controlApply:       document.getElementById("control-apply"),
+    controlStatus:      document.getElementById("control-status"),
+    controlEffective:   document.getElementById("control-effective"),
+    // Reports tab controls.
+    reportStart:     document.getElementById("report-start"),
+    reportEnd:       document.getElementById("report-end"),
+    reportHours:     document.getElementById("report-hours"),
+    reportGenerate:  document.getElementById("report-generate"),
+    reportDownload:  document.getElementById("report-download"),
+    reportStatus:    document.getElementById("report-status"),
+    reportSummary:   document.getElementById("report-summary"),
+    reportCount:     document.getElementById("report-count"),
+    reportTemp:      document.getElementById("report-temp"),
+    reportHumidity:  document.getElementById("report-humidity"),
+    reportAmmonia:   document.getElementById("report-ammonia"),
+    reportStateBody: document.getElementById("report-state-body"),
   };
 
   const STATE_META = {
@@ -217,6 +261,7 @@
     el.valTemp.textContent = latest.temperature.toFixed(1);
     el.valHum.textContent = latest.humidity.toFixed(1);
     el.valNh3.textContent = latest.ammonia_level.toFixed(1);
+    renderAmmoniaRisk(latest.ammonia_level);
 
     el.fcTemp.textContent = fmtForecast(latest.predicted_temperature, "degC");
     el.fcNh3.textContent = fmtForecast(latest.predicted_ammonia, "ppm");
@@ -231,6 +276,33 @@
     el.cardNh3.dataset.alert  = alertForMetric(latest.predicted_class, "ammonia");
 
     renderSpikeRisk(latest.predicted_spike_probability);
+  }
+
+  /* ---------------------- Ammonia risk / age band lookups ------------------
+     Reference-table lookups (Table 4-1 / Table 4-2), driven by whatever the
+     historical endpoint most recently echoed in thresholds.*. Pure lookups
+     over data already in memory, so the age-band preview updates as the
+     operator types without a server round trip. */
+
+  function lookupAmmoniaRisk(ppm) {
+    for (const tier of ammoniaRiskLevels) {
+      if (tier.max_ppm === null || ppm <= tier.max_ppm) return tier;
+    }
+    return ammoniaRiskLevels.length ? ammoniaRiskLevels[ammoniaRiskLevels.length - 1] : null;
+  }
+
+  function lookupAgeBand(ageWeeks) {
+    const weeks = Math.max(1, ageWeeks || 1);
+    for (const band of ageTemperatureBands) {
+      if (band.max_week === null || weeks <= band.max_week) return band;
+    }
+    return ageTemperatureBands.length ? ageTemperatureBands[ageTemperatureBands.length - 1] : null;
+  }
+
+  function renderAmmoniaRisk(ammoniaPpm) {
+    const tier = lookupAmmoniaRisk(ammoniaPpm);
+    el.ammoniaRiskLabel.textContent = tier ? `Risk: ${tier.label}` : "Risk: --";
+    el.ammoniaRisk.dataset.risk = tier ? tier.key : "";
   }
 
   /**
@@ -385,28 +457,19 @@
   });
 
   /* --------------------------- Tab controller ----------------------------
-     Single-page view switch. Both panels stay mounted so the polling loop
-     continues feeding the console tail even while the user reads the
-     Overview view; switching to Logs shows the accumulated tail immediately
-     with no re-fetch latency. */
+     Pane switching itself is Bootstrap's tab component (data-bs-toggle="tab"
+     in the template); all panes stay mounted throughout so the polling loop
+     keeps feeding the console tail even while another tab is active. The
+     only behavior layered on top here: entering Logs should honor the
+     pause state rather than always yanking the view to the bottom. */
 
-  function activateTab(view) {
-    for (const tab of el.tabs) {
-      const isActive = tab.dataset.view === view;
-      tab.setAttribute("aria-selected", String(isActive));
-    }
-    el.views.overview.hidden = view !== "overview";
-    el.views.logs.hidden     = view !== "logs";
-
-    // On entering the logs view, honor the pause state -- if the user paused
-    // scroll on a previous visit, don't yank them to the bottom.
-    if (view === "logs" && el.consolePause.dataset.paused !== "true") {
-      el.consoleFeed.scrollTop = el.consoleFeed.scrollHeight;
-    }
-  }
-
-  for (const tab of el.tabs) {
-    tab.addEventListener("click", () => activateTab(tab.dataset.view));
+  const logsTabButton = document.getElementById("tab-logs");
+  if (logsTabButton) {
+    logsTabButton.addEventListener("shown.bs.tab", () => {
+      if (el.consolePause.dataset.paused !== "true") {
+        el.consoleFeed.scrollTop = el.consoleFeed.scrollHeight;
+      }
+    });
   }
 
   /* ------------------------------ Link state ------------------------------ */
@@ -415,6 +478,237 @@
     el.linkState.dataset.state = state;
     el.linkLabel.textContent = label;
   }
+
+  /* --------------------------- Flock profile panel -------------------------
+     Age input drives the age-derived temperature band preview immediately
+     (client-side lookup against the echoed Table 4-2); "Apply" is what
+     actually persists the profile server-side and switches ingestion
+     classification onto it (see FlockProfile.is_configured). */
+
+  function updateAgeBandPreview() {
+    const band = lookupAgeBand(parseInt(el.profileAge.value, 10));
+    if (band) {
+      el.profileAgeBand.textContent = `${band.temp_min_c.toFixed(1)} - ${band.temp_max_c.toFixed(1)} degC`;
+    }
+  }
+
+  function updateCustomFieldVisibility() {
+    const showCustom = el.profileUseCustom.checked;
+    for (const field of el.profileCustomFields) field.hidden = !showCustom;
+  }
+
+  function applyProfileToForm(profile) {
+    el.profileAge.value = profile.age_weeks;
+    el.profileUseCustom.checked = profile.use_custom_thresholds;
+    el.profileTempMin.value = profile.custom_temp_min_c ?? "";
+    el.profileTempMax.value = profile.custom_temp_max_c ?? "";
+    el.profileAmmoniaCrit.value = profile.custom_ammonia_critical_ppm ?? "";
+    updateCustomFieldVisibility();
+    updateAgeBandPreview();
+  }
+
+  el.profileAge.addEventListener("input", updateAgeBandPreview);
+  el.profileUseCustom.addEventListener("change", updateCustomFieldVisibility);
+
+  el.profileApply.addEventListener("click", async () => {
+    const payload = {
+      age_weeks: parseInt(el.profileAge.value, 10) || 1,
+      use_custom_thresholds: el.profileUseCustom.checked,
+    };
+    if (el.profileUseCustom.checked) {
+      const parseOrNull = (raw) => (raw === "" ? null : parseFloat(raw));
+      payload.custom_temp_min_c = parseOrNull(el.profileTempMin.value);
+      payload.custom_temp_max_c = parseOrNull(el.profileTempMax.value);
+      payload.custom_ammonia_critical_ppm = parseOrNull(el.profileAmmoniaCrit.value);
+    }
+
+    el.profileStatus.textContent = "Saving...";
+    el.profileStatus.dataset.state = "";
+    try {
+      const response = await fetch(API_PROFILE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+
+      applyProfileToForm(body.profile);
+      el.profileStatus.textContent = "Saved";
+      el.profileStatus.dataset.state = "ok";
+      refresh();   // Pull the freshly-active thresholds in immediately.
+    } catch (err) {
+      el.profileStatus.textContent = `Error: ${err.message}`;
+      el.profileStatus.dataset.state = "error";
+      console.error("Flock profile save failed:", err);
+    }
+  });
+
+  /* -------------------------- Actuator control panel ------------------------
+     Mode buttons and sliders are locally-staged; nothing is sent to the
+     server until "Apply" is clicked (same discipline as the flock profile
+     panel). The "effective right now" readout is refreshed every poll tick
+     regardless, so AUTO's classifier-derived duty stays visible live even
+     though the panel itself isn't submitted. */
+
+  function setControlModeUI(mode) {
+    selectedControlMode = mode;
+    const isAuto = mode === "AUTO";
+    el.controlModeAuto.classList.toggle("active", isAuto);
+    el.controlModeAuto.setAttribute("aria-pressed", String(isAuto));
+    el.controlModeManual.classList.toggle("active", !isAuto);
+    el.controlModeManual.setAttribute("aria-pressed", String(!isAuto));
+  }
+
+  function renderControlEffective(control) {
+    const heaterState = control.effective_heater_pct > 0 ? "ON" : "OFF";
+    el.controlEffective.textContent =
+      `Fan ${control.effective_fan_pct}% · Heater ${heaterState}`;
+  }
+
+  function applyControlToForm(control) {
+    setControlModeUI(control.mode);
+    el.controlFan.value = control.fan_speed_pct;
+    el.controlFanValue.textContent = `${control.fan_speed_pct}%`;
+    // Heater is relay-switched (on/off only, no variable power) -- checkbox,
+    // not a percentage.
+    el.controlHeater.checked = control.heater_power_pct > 0;
+    el.controlHeaterValue.textContent = el.controlHeater.checked ? "ON" : "OFF";
+    renderControlEffective(control);
+  }
+
+  el.controlModeAuto.addEventListener("click", () => setControlModeUI("AUTO"));
+  el.controlModeManual.addEventListener("click", () => setControlModeUI("MANUAL"));
+
+  el.controlFan.addEventListener("input", () => {
+    el.controlFanValue.textContent = `${el.controlFan.value}%`;
+  });
+  el.controlHeater.addEventListener("change", () => {
+    el.controlHeaterValue.textContent = el.controlHeater.checked ? "ON" : "OFF";
+  });
+
+  el.controlApply.addEventListener("click", async () => {
+    const payload = {
+      mode: selectedControlMode,
+      fan_speed_pct: parseInt(el.controlFan.value, 10) || 0,
+      heater_power_pct: el.controlHeater.checked ? 100 : 0,
+    };
+
+    el.controlStatus.textContent = "Saving...";
+    el.controlStatus.dataset.state = "";
+    try {
+      const response = await fetch(API_CONTROL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+
+      applyControlToForm(body.control);
+      el.controlStatus.textContent = "Saved";
+      el.controlStatus.dataset.state = "ok";
+    } catch (err) {
+      el.controlStatus.textContent = `Error: ${err.message}`;
+      el.controlStatus.dataset.state = "error";
+      console.error("Actuator control save failed:", err);
+    }
+  });
+
+  async function refreshControl() {
+    try {
+      const response = await fetch(API_CONTROL, { headers: { Accept: "application/json" } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+
+      if (!controlFormInitialized) {
+        applyControlToForm(body.control);
+        controlFormInitialized = true;
+      } else {
+        // Keep the live "effective" readout current without clobbering an
+        // in-progress mode/slider edit the operator hasn't applied yet.
+        renderControlEffective(body.control);
+      }
+    } catch (err) {
+      console.error("Actuator control refresh failed:", err);
+    }
+  }
+
+  /* -------------------------------- Reports -------------------------------
+     On-demand only -- no polling. A quick-hours <select> and explicit
+     start/end <input type=date> feed the same window semantics the
+     /report/ and /export/ endpoints share; picking one clears the other so
+     it's always unambiguous which the next click will use. */
+
+  el.reportHours.addEventListener("change", () => {
+    if (el.reportHours.value) {
+      el.reportStart.value = "";
+      el.reportEnd.value = "";
+    }
+  });
+  for (const dateInput of [el.reportStart, el.reportEnd]) {
+    dateInput.addEventListener("change", () => {
+      if (dateInput.value) el.reportHours.value = "";
+    });
+  }
+
+  function buildReportQuery() {
+    if (el.reportHours.value) {
+      return `hours=${encodeURIComponent(el.reportHours.value)}`;
+    }
+    const params = [];
+    if (el.reportStart.value) params.push(`start=${encodeURIComponent(el.reportStart.value)}`);
+    if (el.reportEnd.value) params.push(`end=${encodeURIComponent(el.reportEnd.value)}`);
+    return params.join("&");
+  }
+
+  function renderReport(body) {
+    el.reportSummary.hidden = false;
+    el.reportCount.textContent = body.count;
+
+    const fmt = (v) => (typeof v === "number" ? v.toFixed(1) : "--");
+    const avg = body.averages;
+    el.reportTemp.textContent =
+      `${fmt(avg.min_temperature)} / ${fmt(avg.avg_temperature)} / ${fmt(avg.max_temperature)} degC`;
+    el.reportHumidity.textContent =
+      `${fmt(avg.min_humidity)} / ${fmt(avg.avg_humidity)} / ${fmt(avg.max_humidity)} %`;
+    el.reportAmmonia.textContent =
+      `${fmt(avg.min_ammonia_level)} / ${fmt(avg.avg_ammonia_level)} / ${fmt(avg.max_ammonia_level)} ppm`;
+
+    el.reportStateBody.innerHTML = "";
+    for (const [state, count] of Object.entries(body.state_counts)) {
+      const row = document.createElement("tr");
+      const label = BADGE_LABELS[state] || state;
+      row.innerHTML = `<td>${label}</td><td class="mono">${count}</td>`;
+      el.reportStateBody.appendChild(row);
+    }
+  }
+
+  el.reportGenerate.addEventListener("click", async () => {
+    const query = buildReportQuery();
+    el.reportStatus.textContent = "Loading...";
+    el.reportStatus.dataset.state = "";
+    try {
+      const response = await fetch(`${API_REPORT}${query ? `?${query}` : ""}`, {
+        headers: { Accept: "application/json" },
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+
+      renderReport(body);
+      el.reportStatus.textContent = `Generated — ${body.count} record(s)`;
+      el.reportStatus.dataset.state = "ok";
+    } catch (err) {
+      el.reportStatus.textContent = `Error: ${err.message}`;
+      el.reportStatus.dataset.state = "error";
+      console.error("Report generation failed:", err);
+    }
+  });
+
+  el.reportDownload.addEventListener("click", () => {
+    const query = buildReportQuery();
+    window.location.href = `${API_EXPORT}${query ? `?${query}` : ""}`;
+  });
 
   /* ------------------------------ Poll loop ------------------------------ */
 
@@ -434,6 +728,22 @@
       if (typeof body.thresholds.ammonia_spike_risk_threshold === "number") {
         spikeRiskThreshold = body.thresholds.ammonia_spike_risk_threshold;
       }
+      if (Array.isArray(body.thresholds.ammonia_risk_levels)) {
+        ammoniaRiskLevels = body.thresholds.ammonia_risk_levels;
+      }
+      if (Array.isArray(body.thresholds.age_temperature_bands)) {
+        ageTemperatureBands = body.thresholds.age_temperature_bands;
+      }
+      el.heatLimitValue.textContent = body.thresholds.heat_stress_temp_c.toFixed(1);
+      el.ammoniaMaxValue.textContent = body.thresholds.ammonia_critical_ppm.toFixed(1);
+
+      // Only hydrate the profile form from the server on the first
+      // successful poll -- afterwards the form is user-owned, and the 5s
+      // poll must not overwrite an in-progress edit out from under them.
+      if (!profileFormInitialized && body.profile) {
+        applyProfileToForm(body.profile);
+        profileFormInitialized = true;
+      }
 
       setLinkState("online", "Link online");
       // Store all points for the windowed chart renderer.
@@ -450,10 +760,19 @@
     } finally {
       inFlight = false;
     }
+
+    refreshControl();   // Independent endpoint; a failure here shouldn't affect link state above.
   }
 
   el.windowSel.addEventListener("change", () => {
     resetConsole();
+    // Reset the chart's own pan window so the newly-fetched time range is
+    // actually visible instead of staying clipped to the last 200 points
+    // of it -- otherwise picking 1h vs 72h renders an identical chart.
+    chartOffset = 0;
+    chartWindowSize = 0;
+    const chartWinSel = document.getElementById("chart-window-select");
+    if (chartWinSel) chartWinSel.value = "0";
     refresh();
   });
 

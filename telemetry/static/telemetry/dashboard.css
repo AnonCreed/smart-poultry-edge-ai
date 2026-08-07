@@ -1,294 +1,39 @@
 /* ==========================================================================
    Poultry Telemetry - Environmental console stylesheet
-   Design system: refined developer-tool dark mode (Grafana/Linear register).
-   Deep zinc canvas, muted gray containers, thin crisp borders for structural
-   depth. Alert states use desaturated text tones and a 2px left-border
-   highlight instead of solid filled blocks; data stays fully readable.
+
+   This file only covers what Bootstrap (vendored, see dashboard.html) does
+   not: chart sizing, the chart-series/status color tokens Chart.js reads at
+   runtime, the dark console/log surface, and small dot/swatch indicators.
+   Everything else -- cards, buttons, forms, tables, the tab bar, the grid --
+   is stock Bootstrap components and utility classes with no overrides.
    ========================================================================== */
 
+/* ------------------------- Chart series color tokens ----------------------
+   Read by dashboard.js via getComputedStyle() and handed straight to
+   Chart.js, so these stay real CSS custom properties rather than utility
+   classes. Aliased to Bootstrap's own theme colors so the charts stay in
+   the same palette as the rest of the page instead of introducing a second
+   one. */
 :root {
-  /* Surface scale */
-  --bg:          #09090b;   /* deep zinc canvas                     */
-  --panel:       #18181b;   /* component containers                 */
-  --panel-raise: #1f1f23;   /* hover / inset surfaces               */
-  --border:      #27272a;   /* thin crisp structural borders        */
-  --border-soft: #202023;
-
-  /* Text scale */
-  --text:      #e4e4e7;
-  --text-mute: #a1a1aa;
-  --text-dim:  #63636b;
-
-  /* State palette: sophisticated, desaturated accents */
-  --ok:        #22c55e;   /* optimal: muted green accent            */
-  --warn:      #f59e0b;   /* warning: crisp amber text tone         */
-  --crit:      #ef4444;   /* critical: sharp crimson text accent    */
-  --cold:      #60a5fa;   /* low-temperature: desaturated blue      */
-
-  /* Chart series */
-  --temp-live: #f59e0b;
-  --temp-pred: #fbd38d;
-  --nh3-live:  #34d399;
-  --nh3-pred:  #a7f3d0;
-  --threshold: #7f1d1d;
-
-  --font-ui:   "Inter", system-ui, sans-serif;
-  --font-mono: "IBM Plex Mono", monospace;
-
-  --radius: 8px;
+  --temp-live: var(--bs-primary);
+  --temp-pred: #569afe;   /* darker than the old #9ec5fe tint -- still reads as "forecast", more visible */
+  --nh3-live:  var(--bs-success);
+  --nh3-pred:  #5eab88;   /* darker than the old #a3cfbb tint -- still reads as "forecast", more visible */
+  --crit:      var(--bs-danger);
+  --border-soft: var(--bs-border-color);
+  --text-dim:    var(--bs-secondary-color);
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+/* ------------------------------ Chart canvases ----------------------------- */
 
-html, body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-ui);
-  font-size: 14px;
-  min-height: 100%;
-}
+.chart-wrap { position: relative; height: 270px; }
+.chart-wrap-tall { height: 420px; }
 
-.mono { font-family: var(--font-mono); }
+.chart-scroll-range-info { margin-left: auto; color: var(--bs-secondary-color); font-size: 0.75rem; }
 
-/* -------------------------------- Top bar ------------------------------- */
+/* ------------------------------ Legend swatches ---------------------------- */
 
-.topbar {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 20px;
-  padding: 12px 24px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-}
-
-@media (max-width: 900px) {
-  .topbar { grid-template-columns: 1fr; }
-}
-
-.topbar-identity { display: flex; align-items: center; gap: 12px; }
-
-/* Understated brand mark: a 3x10 accent bar, the page's only ornament. */
-.topbar-mark {
-  width: 3px; height: 30px;
-  border-radius: 2px;
-  background: var(--ok);
-  display: inline-block;
-}
-
-.topbar h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
-.topbar-sub { color: var(--text-mute); font-size: 12px; }
-
-.topbar-controls { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; justify-self: end; }
-
-/* --------------------------------- Tabs --------------------------------- */
-
-.tabs {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  background: var(--panel-raise);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  justify-self: center;
-}
-
-.tab {
-  background: transparent;
-  color: var(--text-mute);
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 6px 14px;
-  font-family: var(--font-ui);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  letter-spacing: -0.005em;
-}
-
-.tab:hover { color: var(--text); }
-.tab:focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
-
-.tab[aria-selected="true"] {
-  color: var(--text);
-  background: var(--panel);
-  border-color: var(--border);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03);
-}
-
-@media (max-width: 900px) {
-  .tabs { justify-self: stretch; width: 100%; justify-content: center; }
-}
-
-.link-pill {
-  display: flex; align-items: center; gap: 7px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-mute);
-}
-
-.link-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); }
-
-.link-pill[data-state="online"]  { color: var(--ok); border-color: rgba(34, 197, 94, 0.35); }
-.link-pill[data-state="online"]  .link-dot { background: var(--ok); animation: pulse 2.4s ease-in-out infinite; }
-.link-pill[data-state="offline"] { color: var(--crit); border-color: rgba(239, 68, 68, 0.35); }
-.link-pill[data-state="offline"] .link-dot { background: var(--crit); }
-
-@keyframes pulse { 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) {
-  .link-pill[data-state="online"] .link-dot { animation: none; }
-}
-
-.control-group { display: flex; flex-direction: column; gap: 1px; }
-.control-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
-.control-value { font-size: 13px; }
-
-#window-select {
-  background: var(--panel-raise);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-family: var(--font-ui);
-  font-size: 12px;
-  padding: 3px 8px;
-}
-#window-select:focus-visible,
-#console-pause:focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
-
-/* ------------------------------- Layout --------------------------------- */
-
-.layout {
-  display: grid;
-  gap: 16px;
-  padding: 16px 24px;
-  max-width: 1560px;
-  margin: 0 auto;
-}
-
-/* auto-fit rather than a hardcoded column count: the row now holds 5 cards
-   (temperature, humidity, ammonia, state, AI spike risk) and should keep
-   accommodating additions without a matching media-query edit each time. */
-.metrics-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
-.charts-row  { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-
-@media (max-width: 1100px) {
-  .charts-row  { grid-template-columns: 1fr; }
-}
-@media (max-width: 560px) {
-  .layout { padding: 12px; }
-}
-
-/* -------------------------------- Cards --------------------------------- */
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.metric {
-  padding: 14px 16px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-left: 2px solid transparent;  /* state highlight slot */
-}
-
-.metric-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.metric-name { font-size: 12px; font-weight: 500; color: var(--text-mute); }
-.metric-unit { font-size: 10px; color: var(--text-dim); }
-
-.metric-value {
-  font-size: 34px;
-  font-weight: 500;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-}
-
-/* Muted secondary line under the primary value: renders the Edge-AI
-   forecast value for that channel. Falls back to "pending" when the
-   forecast key is null (hardware not yet linked). */
-.metric-forecast {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-dim);
-  line-height: 1.4;
-}
-.metric-forecast-empty { visibility: hidden; }
-
-.metric-sub {
-  display: flex; justify-content: space-between; gap: 8px;
-  font-size: 11px;
-  color: var(--text-dim);
-  border-top: 1px solid var(--border-soft);
-  padding-top: 8px;
-}
-
-/* Desaturated state accents: colored value text + 2px left-border highlight.
-   Backgrounds stay untouched so data remains readable and non-intimidating. */
-.metric[data-alert="warn"] { border-left-color: var(--warn); }
-.metric[data-alert="warn"] .metric-value { color: var(--warn); }
-
-.metric[data-alert="crit"] { border-left-color: var(--crit); }
-.metric[data-alert="crit"] .metric-value { color: var(--crit); }
-
-.metric[data-alert="cold"] { border-left-color: var(--cold); }
-.metric[data-alert="cold"] .metric-value { color: var(--cold); }
-
-.metric[data-alert="ok"] { border-left-color: rgba(34, 197, 94, 0.45); }
-
-/* ------------------------------ State card ------------------------------ */
-
-.state-line {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-family: var(--font-mono);
-  font-size: 16px;
-  font-weight: 500;
-  padding: 8px 0 2px;
-  color: var(--text-mute);
-}
-
-.state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: none; }
-
-.state-card[data-alert] { border-left: 2px solid transparent; }
-
-.state-line[data-state="OPTIMAL_ENVIRONMENT"] { color: var(--ok); }
-.state-line[data-state="OPTIMAL_ENVIRONMENT"] .state-dot { background: var(--ok); }
-
-.state-line[data-state="HEAT_STRESS_WARNING"] { color: var(--warn); }
-.state-line[data-state="HEAT_STRESS_WARNING"] .state-dot { background: var(--warn); }
-
-.state-line[data-state="LOW_TEMP_ALERT"] { color: var(--cold); }
-.state-line[data-state="LOW_TEMP_ALERT"] .state-dot { background: var(--cold); }
-
-.state-line[data-state="CRITICAL_AMMONIA"] { color: var(--crit); }
-.state-line[data-state="CRITICAL_AMMONIA"] .state-dot { background: var(--crit); }
-
-/* -------------------------------- Panels -------------------------------- */
-
-.panel { padding: 14px 16px 16px; }
-
-.panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.panel-head h2 { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
-
-.legend { display: flex; gap: 14px; flex-wrap: wrap; }
-.legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-mute); }
-
-.swatch { width: 14px; height: 0; border-top: 2px solid; display: inline-block; }
+.swatch { width: 14px; height: 0; border-top: 2px solid; display: inline-block; margin-right: 4px; vertical-align: middle; }
 .swatch-temp-live { border-color: var(--temp-live); }
 .swatch-temp-pred { border-color: var(--temp-pred); }
 .swatch-nh3-live  { border-color: var(--nh3-live); }
@@ -296,114 +41,97 @@ html, body {
 .swatch-threshold { border-color: var(--crit); }
 .swatch-dashed    { border-top-style: dashed; }
 
-.chart-wrap { position: relative; height: 270px; }
-.chart-wrap-tall { height: 420px; }
+/* ------------------------- Status dots (badges/risk) ----------------------- */
 
-/* Chart scroll controls */
-.chart-scroll-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 4px 2px;
-  border-top: 1px solid var(--border-soft);
-  flex-wrap: wrap;
-}
-.chart-scroll-label { color: var(--text-dim); font-size: 11px; }
-.chart-scroll-btn {
-  background: var(--surface-2);
-  border: 1px solid var(--border-soft);
-  color: var(--text-dim);
-  padding: 3px 10px;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  font-family: inherit;
-  transition: background 0.15s, color 0.15s;
-}
-.chart-scroll-btn:hover { background: var(--surface-3); color: var(--text-primary); }
-.chart-scroll-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.chart-scroll-btn-accent {
-  background: var(--accent-dim);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.chart-window-select {
-  background: var(--surface-2);
-  border: 1px solid var(--border-soft);
-  color: var(--text-dim);
-  padding: 3px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-}
-.chart-scroll-range-info {
-  margin-left: auto;
-  color: var(--text-dim);
-  font-size: 11px;
+.state-dot, .risk-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
 }
 
-/* -------------------------- Logs view (full page) ------------------------ */
-
-.logs-layout { padding-bottom: 24px; }
-.logs-panel { display: flex; flex-direction: column; min-height: calc(100vh - 220px); }
-.panel-caption { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
-.console-tall { flex: 1; height: auto; min-height: 480px; }
-
-/* ---------------------------- Live console feed -------------------------- */
-
-.console-meta { display: flex; align-items: center; gap: 12px; }
-#console-count { font-size: 11px; color: var(--text-dim); }
-
-#console-pause {
-  background: var(--panel-raise);
-  color: var(--text-mute);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-family: var(--font-ui);
-  font-size: 11px;
-  padding: 3px 10px;
-  cursor: pointer;
+/* Environmental-state hero card: the one thing an operator should read
+   first, so it's pulled out of the metrics grid and fully colored (not
+   just a border/dot accent) from whatever JS just set on data-state. */
+#state-badge {
+  background: var(--bs-secondary);
+  color: #fff;
+  border: none;
+  transition: background-color 0.15s;
 }
-#console-pause:hover { color: var(--text); }
-#console-pause[data-paused="true"] { color: var(--warn); border-color: rgba(245, 158, 11, 0.4); }
+#state-badge[data-state="OPTIMAL_ENVIRONMENT"] { background: var(--bs-success); }
+#state-badge[data-state="HEAT_STRESS_WARNING"] { background: var(--bs-warning); color: #000; }
+#state-badge[data-state="LOW_TEMP_ALERT"]      { background: var(--bs-primary); }
+#state-badge[data-state="CRITICAL_AMMONIA"]    { background: var(--bs-danger); }
 
+.state-hero .state-dot { width: 10px; height: 10px; }
+.state-hero-eyebrow { opacity: 0.85; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* Ammonia risk tier (Table 4-1) -- text stays the default body color, only
+   the dot encodes severity so the row reads fine on its own if color is
+   stripped (print, high-contrast mode). */
+#ammonia-risk { color: var(--bs-secondary-color); }
+#ammonia-risk[data-risk="no_risk"]  .risk-dot,
+#ammonia-risk[data-risk="low_risk"] .risk-dot      { color: var(--bs-success); }
+#ammonia-risk[data-risk="moderate_risk"] .risk-dot { color: var(--bs-warning); }
+#ammonia-risk[data-risk="high_risk"] .risk-dot,
+#ammonia-risk[data-risk="very_high_risk"] .risk-dot { color: var(--bs-danger); }
+
+/* Metric cards: a colored left border is the only alert cue, kept subtle so
+   it reads as "flagged" without turning the whole card into a warning box. */
+.card[data-alert="warn"] { border-left: 3px solid var(--bs-warning); }
+.card[data-alert="crit"] { border-left: 3px solid var(--bs-danger); }
+.card[data-alert="cold"] { border-left: 3px solid var(--bs-primary); }
+
+/* Link-state pill (top nav): same pattern as the state badge above -- a
+   plain badge in the template, fully colored here from data-state. */
+#link-state {
+  background: var(--bs-secondary) !important;
+  color: #fff;
+}
+#link-state[data-state="online"]  { background: var(--bs-success) !important; }
+#link-state[data-state="offline"] { background: var(--bs-danger) !important; }
+
+/* Console pause toggle: flag the paused state on the otherwise-plain
+   outline button. */
+#console-pause[data-paused="true"] {
+  color: #997404;
+  border-color: #ffda6a;
+  background: #fff8e1;
+}
+
+/* ---------------------------- Live console feed ----------------------------
+   The one deliberately dark surface on the page -- a real "terminal" feel
+   for the raw ingestion tail, calibrated against a near-black background
+   rather than the page's light Bootstrap surface. */
 .console {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  --term-ok:   #22c55e;
+  --term-warn: #f59e0b;
+  --term-cold: #60a5fa;
+  --term-crit: #f87171;
+  --term-dim:  #7c7c85;
+
+  background: #131316;
+  border: 1px solid #26262b;
+  border-radius: var(--bs-border-radius);
   height: 300px;
   overflow-y: auto;
-  padding: 10px 12px;
-  font-family: var(--font-mono);
-  font-size: 12px;
+  padding: 12px 14px;
+  font-family: var(--bs-font-monospace);
+  font-size: 0.8rem;
   line-height: 1.7;
 }
+.console-tall { flex: 1; height: auto; min-height: 480px; }
+#view-logs .card-body { min-height: calc(100vh - 260px); }
 
-.console-line {
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-mute);
-}
-
-/* Per-line state tinting: text color only, no filled blocks. */
-.console-line.line-ok    { color: var(--text-mute); }
-.console-line.line-ok    .line-state { color: var(--ok); }
-.console-line.line-warn  { color: var(--warn); }
-.console-line.line-cold  { color: var(--cold); }
-.console-line.line-crit  { color: var(--crit); }
-.console-line.line-muted { color: var(--text-dim); }
+.console-line { white-space: pre-wrap; word-break: break-word; color: #c7c7cf; }
+.console-line.line-ok    { color: #c7c7cf; }
+.console-line.line-warn  { color: var(--term-warn); }
+.console-line.line-cold  { color: var(--term-cold); }
+.console-line.line-crit  { color: var(--term-crit); }
+.console-line.line-muted { color: var(--term-dim); }
 
 .console::-webkit-scrollbar { width: 8px; }
-.console::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-
-/* -------------------------------- Footer -------------------------------- */
-
-.footer {
-  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-  padding: 8px 24px 20px;
-  max-width: 1560px;
-  margin: 0 auto;
-  color: var(--text-dim);
-  font-size: 11px;
-}
+.console::-webkit-scrollbar-thumb { background: #333338; border-radius: 4px; }

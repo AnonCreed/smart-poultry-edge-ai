@@ -2,21 +2,21 @@
 
 > **Two-board architecture as of the ESP-NOW revision.** The system is now
 > two microcontrollers, not one: an **ESP32 DevKit V1 sensor node**
-> (`esp32/`, unchanged hardware, revised firmware) reads DHT22/MQ-137 and
+> (`hardware/esp32/`, unchanged hardware, revised firmware) reads DHT11/MQ-137 and
 > sends raw samples over **ESP-NOW** to an **ESP32-S3 master node**
-> (`esp32s3_master/`, new), which runs an on-device TFLite Micro model and
+> (`hardware/esp32s3_master/`, new), which runs an on-device TFLite Micro model and
 > owns the WiFi/HTTP leg to Django. Everything below that describes the
 > single-board HTTP pipeline has been updated to describe the sensor node's
 > half only; the master node's half is documented where it diverges, and in
-> full in `esp32s3_master/README.md`.
+> full in `hardware/esp32s3_master/README.md`.
 
 ## 1. Stack Overview & Library Analysis
 - Microcontroller Hardware: ESP32 DevKit V1 class board (sensor node), selected via board = esp32dev in PlatformIO, plus an ESP32-S3 board (master node) running an Arduino IDE sketch.
-- Core Framework: PlatformIO build system with Arduino C++ framework on Espressif32 for the sensor node; Arduino IDE with the same Espressif "esp32" board package for the master node (required by its TensorFlowLite_ESP32 library dependency -- see esp32s3_master/README.md's "Why Arduino IDE, not PlatformIO").
+- Core Framework: PlatformIO build system with Arduino C++ framework on Espressif32 for the sensor node; Arduino IDE with the same Espressif "esp32" board package for the master node (required by its TensorFlowLite_ESP32 library dependency -- see hardware/esp32s3_master/README.md's "Why Arduino IDE, not PlatformIO").
 
 ### Build and Runtime Context
 - MCU family: ESP32 (dual-core Xtensa, integrated Wi-Fi, hardware PWM via LEDC, ADC1/ADC2 blocks).
-- Firmware environment: [env:esp32dev] in esp32/platformio.ini.
+- Firmware environment: [env:esp32dev] in hardware/esp32/platformio.ini.
 - Monitor/upload settings:
   - monitor_speed = 115200 (matches Serial.begin(115200)).
   - upload_speed = 921600.
@@ -28,11 +28,11 @@
 - Which library is used:
   - DHT sensor driver used through DHT.h and DHT class object.
 - Why it was chosen over alternatives:
-  - Mature timing-critical implementation for DHT22 one-wire style protocol.
+  - Mature timing-critical implementation for DHT11 one-wire style protocol.
   - Stable API, broad adoption, and good interoperability with Arduino ecosystem.
   - Lower integration risk versus writing custom bit-banged timing logic (which is error-prone under RTOS scheduling).
 - How it operates inside the code:
-  - Constructed once as static DHT dht(PIN_DHT_DATA, DHT22).
+  - Constructed once as static DHT dht(PIN_DHT_DATA, DHT11).
   - Initialized by dht.begin() in setup().
   - dht.readHumidity() and dht.readTemperature() called per sample tick in sampleDht().
   - NAN return values are treated as invalid data and the tick is skipped.
@@ -55,7 +55,7 @@
   - `esp_now_init()`, `esp_now_register_send_cb`/`esp_now_register_recv_cb`, and `esp_now_add_peer()` with the master's MAC address (`MASTER_MAC_ADDR` in config.h) in `initEspNow()`.
   - `esp_now_send()` transmits a `SensorPacket` struct (not JSON -- a fixed-layout binary struct, memcpy'd directly into/out of the ESP-NOW payload on both boards).
   - `onDataRecv()` receives an `ActuatorCommand` struct relayed back from the master, under a critical section since the callback runs in the WiFi task context.
-- Note: the master node (`esp32s3_master/`) still uses `bblanchon/ArduinoJson` and `HTTPClient.h` exactly as described in the original single-board design below -- it has simply moved from this board to that one. See `esp32s3_master/README.md`.
+- Note: the master node (`hardware/esp32s3_master/`) still uses `bblanchon/ArduinoJson` and `HTTPClient.h` exactly as described in the original single-board design below -- it has simply moved from this board to that one. See `hardware/esp32s3_master/README.md`.
 
 ### Dependency Breakdown from include directives in main.cpp
 1. Arduino.h
@@ -91,7 +91,7 @@
   - configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER) once after WiFi connects; getLocalTime(&timeinfo, ...) per sample to populate SensorPacket::hour/month.
 
 5. DHT.h
-- Used to read DHT22 sensor values via DHT class.
+- Used to read DHT11 sensor values via DHT class.
 
 6. math.h
 - Which library is used:
@@ -111,12 +111,12 @@
 
 ### Custom C++ Source/Header Inventory
 - Sensor node (PlatformIO, ESP32 DevKit V1):
-  - Source: esp32/src/main.cpp
-  - Header: esp32/include/config.h
+  - Source: hardware/esp32/src/main.cpp
+  - Header: hardware/esp32/include/config.h
 - Master node (Arduino IDE sketch, ESP32-S3):
-  - Sketch: esp32s3_master/esp32s3_master.ino
-  - Headers: esp32s3_master/config_master.h (network/pairing config),
-    esp32s3_master/model_data.h and esp32s3_master/scaler_params.h (trained
+  - Sketch: hardware/esp32s3_master/esp32s3_master.ino
+  - Headers: hardware/esp32s3_master/config_master.h (network/pairing config),
+    hardware/esp32s3_master/model_data.h and hardware/esp32s3_master/scaler_params.h (trained
     TFLite Micro model + feature normalization -- generated artifacts, not
     hand-written logic).
 
@@ -124,16 +124,17 @@
 
 | Component Name | Pin / GPIO # | Component Type (Sensor/Actuator/Power) | Signal Type (Analog / Digital / I2C / SPI) | Active State (HIGH/LOW) | Technical Purpose |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| DHT22 Data Line | GPIO4 (PIN_DHT_DATA) | Sensor | Digital single-wire style data | Idle HIGH via pull-up, data pulses active low/high timing encoded | Reads ambient temperature and humidity in sampleDht(). |
+| DHT11 Data Line | GPIO4 (PIN_DHT_DATA) | Sensor | Digital single-wire style data | Idle HIGH via pull-up, data pulses active low/high timing encoded | Reads ambient temperature and humidity in sampleDht(). |
 | MQ-137 Analog Output | GPIO34 (PIN_MQ_DATA, ADC1_CH6) | Sensor | Analog (ADC1, 12-bit, 11 dB attenuation) | N/A (continuous analog voltage) | Reads NH3 proxy voltage, oversampled then converted to PPM in mqCountsToPpm(). |
-| Fan MOSFET Gate PWM | GPIO32 (PIN_PWM_FAN) | Actuator | Digital PWM (LEDC channel 0, 25 kHz, 8-bit) | Effective ON when duty > 0 (configured ON duty 220/255) | Drives ventilation fan for CRITICAL_AMMONIA and HEAT_STRESS_WARNING states. |
-| Heater MOSFET Gate PWM | GPIO33 (PIN_PWM_HEATER) | Actuator | Digital PWM (LEDC channel 1, 25 kHz, 8-bit) | Effective ON when duty > 0 (configured ON duty 220/255) | Drives heater for LOW_TEMP_ALERT state. |
+| Fan PWM (speed) | GPIO32 (PIN_PWM_FAN) | Actuator | Digital PWM (LEDC channel 0, 25 kHz, 8-bit) | Duty is a *speed target*, not a power switch | Wired directly to pin 4 of a standard 4-pin PC fan (its own internal driver IC). **Not a MOSFET gate** -- the fan's +12V/GND leads are wired straight to the rail, always powered; this line only tells the fan's onboard controller what speed to target. Many such fans don't honor 0% duty as a true stop (idle at a minimum RPM floor instead) -- see PIN_FAN_ENABLE below for the actual hard-off. |
+| Fan hard cutoff | GPIO27 (PIN_FAN_ENABLE) | Actuator | Digital output | HIGH = fan powered, LOW = fan de-energized | Gates an external N-MOSFET on the fan's GND leg for a genuine power cutoff, independent of the PWM line's speed-target semantics above. Driven alongside `PWM_FAN_CHANNEL` in `applyActuators()`: HIGH whenever `fan_pwm > 0`, LOW otherwise. |
+| Heater Relay | GPIO25 (PIN_HEATER_RELAY) | Actuator | Digital output | Active-LOW: LOW = heater ON, HIGH = heater OFF | Switches the PTC heater's relay whenever the master-relayed `heater_pwm` byte is nonzero (master computes it from LOW_TEMP_ALERT classification, or a dashboard MANUAL override); ON/OFF only, no speed target -- unlike the fan, this is a plain relay module, not a PWM-driven MOSFET gate. |
 | USB-UART Serial (console) | UART0 default pins (board routed via USB bridge) | Debug/Interface | Digital UART | TX active-high line logic | Boot logs, diagnostics, telemetry printouts at 115200 baud. |
 
 ### Electrical and Pin-Selection Rationale
 - GPIO34 is input-only and mapped to ADC1, which remains usable while Wi-Fi is active; this is critical because ADC2 is unavailable during active Wi-Fi on classic ESP32. This still holds with ESP-NOW: the sensor node's WiFi interface stays associated (see below), so the same ADC1-while-WiFi constraint applies unchanged.
-- PWM fan/heater on GPIO32/33 avoids strapping/conflict pins and supports LEDC hardware channels with independent duty control.
-- DHT22 data line on GPIO4 is a common safe GPIO with external 10 kOhm pull-up assumption.
+- Fan PWM (GPIO32) and its hard-cutoff MOSFET gate (GPIO27) are both general-purpose, non-strapping pins with nothing else assigned to them. The heater relay (GPIO25) is likewise general-purpose/non-strapping; unlike the fan, it's a plain ON/OFF relay module, not a PWM/LEDC channel.
+- DHT11 data line on GPIO4 is a common safe GPIO with external 10 kOhm pull-up assumption.
 
 ## 3. Communication & Data Transmission Pipeline
 
@@ -153,7 +154,7 @@ Sensor node (ESP32)  --ESP-NOW-->  Master node (ESP32-S3)  --WiFi/HTTP-->  Djang
   - Physical/link: IEEE 802.11 Wi-Fi in station mode.
   - Transport: TCP/IP.
   - Application: HTTP REST POST with JSON payload.
-  - Endpoint: POST http://192.168.1.100:8000/api/telemetry/submit/.
+  - Endpoint: `POST http://{discovered-django-host}:8000/api/telemetry/submit/` -- the host IP is no longer hardcoded; the master finds it via a UDP broadcast discovery handshake at boot (see `hardware/esp32s3_master/README.md` "Discovery" section and `telemetry/discovery.py`).
 - Return path -- Django's classification travels master -> sensor node over ESP-NOW as an `ActuatorCommand` struct, the mirror image of hop 1.
 
 ### Sensor Node Request Flow (per 5 s tick)
@@ -168,7 +169,7 @@ Sensor node (ESP32)  --ESP-NOW-->  Master node (ESP32-S3)  --WiFi/HTTP-->  Djang
 
 ### Master Node Flow (per received packet)
 1. onDataRecv() copies the incoming SensorPacket out of the ESP-NOW payload under a critical section (runs in the WiFi task context).
-2. loop() picks up the fresh packet, appends it to a 3-sample raw history and a 6-row engineered feature window (both must fill before inference starts -- see esp32s3_master/README.md's warm-up note).
+2. loop() picks up the fresh packet, appends it to a 3-sample raw history and a 6-row engineered feature window (both must fill before inference starts -- see hardware/esp32s3_master/README.md's warm-up note).
 3. The TFLite Micro interpreter runs one inference producing predicted_temperature, predicted_ammonia, and predicted_spike_probability.
 4. postToDjango() builds the combined JSON record (raw + all three predictions) and POSTs it -- same StaticJsonDocument/HTTPClient pattern the single-board design used.
 5. On HTTP 201, the response's record.predicted_class is parsed and relayed back to the sensor node via esp_now_send() (relayClassificationToSensor()).
@@ -205,7 +206,7 @@ Example payload (master node, prediction populated):
   "predicted_spike_probability": 0.14
 }
 
-Example payload (master node, before its feature/history warm-up completes -- see esp32s3_master/README.md):
+Example payload (master node, before its feature/history warm-up completes -- see hardware/esp32s3_master/README.md):
 {
   "temperature": 30.25,
   "humidity": 62.10,
@@ -260,13 +261,17 @@ Example payload (master node, before its feature/history warm-up completes -- se
 1. Serial monitor configuration and baud:
   - Serial.begin(115200), then short delay(50), then boot log print.
 2. Pin/peripheral initialization:
-  - dht.begin() initializes DHT22 stack.
+  - dht.begin() initializes DHT11 stack.
   - analogReadResolution(12) sets ADC to 12-bit.
   - analogSetAttenuation(ADC_11db) configures approximately 0..3.3V range.
-3. PWM setup:
-  - ledcSetup channel 0 and 1 at 25 kHz, 8-bit.
-  - ledcAttachPin GPIO32->channel0, GPIO33->channel1.
-  - Initial duty both set to 0 to avoid startup actuator glitch.
+3. Actuator setup:
+  - Fan: ledcSetup()/ledcAttachPin() configure and attach the LEDC PWM
+    channel on PIN_PWM_FAN, then ledcWrite() to PWM_DUTY_OFF; PIN_FAN_ENABLE
+    is set as a digital output and driven LOW (de-energized) immediately, so
+    the fan doesn't glitch on before its first control cycle.
+  - Heater: pinMode(OUTPUT) + digitalWrite for PIN_HEATER_RELAY, driven to
+    HEATER_RELAY_OFF (HIGH, active-LOW module) immediately, same
+    don't-glitch-on-boot precaution.
 4. Wi-Fi connection loop and handling:
   - connectWifi() enters STA mode, disables modem sleep, begins association, retries with bounded loop.
 5. NTP time sync:
@@ -289,14 +294,14 @@ Example payload (master node, before its feature/history warm-up completes -- se
 4. Schedule advancement:
   - nextSampleAt = now + SAMPLE_INTERVAL_MS.
 5. Sensor sequence:
-  - Read DHT22 via sampleDht(); abort tick on failure.
+  - Read DHT11 via sampleDht(); abort tick on failure.
   - Read MQ via sampleMq137() with oversampling and conversion.
 6. Transmission sequence:
   - sendSample() populates a SensorPacket (including currentHourMonth()'s wall-clock fields) and calls esp_now_send() to the master.
 7. Failure branch behavior:
   - Logs a failure message on a local send error; actuators are unaffected by this board's own send failures (they only change in response to an incoming ActuatorCommand, or lack thereof).
 
-Forecasting and classification no longer happen on this board at all -- see the Master Node Flow above and esp32s3_master/README.md for where that logic now lives.
+Forecasting and classification no longer happen on this board at all -- see the Master Node Flow above and hardware/esp32s3_master/README.md for where that logic now lives.
 
 ## 5. Exhaustive Function & Logic Index
 
@@ -328,7 +333,7 @@ Forecasting and classification no longer happen on this board at all -- see the 
 ### 5.3 static bool sampleDht(float& temperatureC, float& humidityPct)
 - Function Signature: static bool sampleDht(float& temperatureC, float& humidityPct)
 - Exact Job:
-  - Acquire valid DHT22 humidity and temperature reading pair.
+  - Acquire valid DHT11 humidity and temperature reading pair.
 - Step-by-Step Logic:
 1. Read humidity.
 2. Read temperature in Celsius.
@@ -394,19 +399,33 @@ Forecasting and classification no longer happen on this board at all -- see the 
 1. onDataSent(): logs a delivery-failure diagnostic if status != ESP_NOW_SEND_SUCCESS; no other action.
 2. onDataRecv(): validates the incoming length matches sizeof(ActuatorCommand); if so, memcpy's the payload into g_lastCommand and sets g_newCommand under a critical section (portENTER_CRITICAL_ISR/portEXIT_CRITICAL_ISR) so loop() can safely consume it without a torn read.
 
-### 5.9 static void applyActuators(const char* state)
-- Function Signature: static void applyActuators(const char* state)
+### 5.9 static void applyActuators(uint8_t fan_pwm, uint8_t heater_pwm)
+- Function Signature: static void applyActuators(uint8_t fan_pwm, uint8_t heater_pwm)
 - Exact Job:
-  - Enforce the master-relayed classification into mutually exclusive fan/heater actuation. Logic is identical to the original single-board design; only the parameter type changed (const char* from the ActuatorCommand struct, rather than a String parsed directly out of an HTTP response body).
+  - Apply two bytes the master has already fully computed -- this board makes
+    no actuation decisions of its own any more (no `state`/classification
+    parameter at all). fan_pwm is real PWM (0-255 duty, from the master's
+    MLP-predicted NH3 error or a dashboard MANUAL override); heater_pwm is a
+    0-255 byte (from the classification -- LOW_TEMP_ALERT -> 255, else 0 --
+    or a dashboard MANUAL override) that this board only thresholds, since
+    its heater is a plain active-LOW relay with no speed target.
 - Step-by-Step Logic:
-1. Initialize fanDuty and heaterDuty to OFF.
-2. If state is CRITICAL_AMMONIA or HEAT_STRESS_WARNING:
-  - fanDuty = ON.
-3. Else if state is LOW_TEMP_ALERT:
-  - heaterDuty = ON.
-4. For OPTIMAL_ENVIRONMENT or unknown state:
-  - Both remain OFF.
-5. Write duty values to LEDC fan/heater channels.
+1. heaterOn = (heater_pwm > 0).
+2. digitalWrite(PIN_HEATER_RELAY, heaterOn ? HEATER_RELAY_ON : HEATER_RELAY_OFF)
+   -- HEATER_RELAY_ON is LOW (active-LOW relay module), HEATER_RELAY_OFF is HIGH.
+3. digitalWrite(PIN_FAN_ENABLE, fan_pwm > 0 ? HIGH : LOW) -- hard power
+   cutoff, independent of the PWM duty's own speed-target semantics (see
+   GPIO27 row in the pinout table).
+4. ledcWrite(PWM_FAN_CHANNEL, fan_pwm) -- write the speed target to the
+   fan's PWM line.
+- **Not interlocked:** fan and heater CAN be ON simultaneously -- fan_pwm and
+  heater_pwm are computed independently on the master (and either can come
+  from a MANUAL dashboard override, decoupled from the other), so e.g. a
+  nonzero MANUAL fan override alongside a nonzero heater_pwm runs the fan and
+  energizes the heater relay at once. Earlier revisions of this function
+  guaranteed mutual exclusion (a single classification string drove both
+  outputs, decided locally on this board); that guarantee no longer holds
+  and is not currently re-enforced anywhere in either firmware.
 
 ### 5.10 void setup()
 - Function Signature: void setup()
@@ -417,8 +436,12 @@ Forecasting and classification no longer happen on this board at all -- see the 
 2. Print boot banner.
 3. Initialize DHT sensor.
 4. Configure ADC resolution and attenuation.
-5. Configure and attach LEDC channels/pins.
-6. Force both actuator outputs OFF.
+5. Configure and attach the fan's LEDC PWM channel/pin (PWM_FAN_CHANNEL on
+   PIN_PWM_FAN); configure PIN_FAN_ENABLE and PIN_HEATER_RELAY as plain
+   digital outputs.
+6. Force both actuators OFF before anything else runs: fan PWM duty 0 +
+   PIN_FAN_ENABLE LOW; heater relay HEATER_RELAY_OFF (HIGH, active-LOW
+   module).
 7. Establish Wi-Fi connection (connectWifi()).
 8. Sync NTP time (syncNtpTime()).
 9. Bring up ESP-NOW and register the master as a peer (initEspNow()); halt in an infinite delay loop on failure.
@@ -437,12 +460,13 @@ Forecasting and classification no longer happen on this board at all -- see the 
 5. Read DHT values; if invalid, abort tick.
 6. Read ammonia ppm via sampleMq137().
 7. Compute forecast values and validity flag.
-8. Call transmit() with live + predicted channels.
-9. If transmit successful:
-  - applyActuators(parsed_state).
-  - print formatted telemetry/classification line.
-10. Else:
-  - print failure line and retain current actuator state.
+8. Call sendSample() over ESP-NOW with the live readings (this board no
+   longer computes a forecast itself -- see item 2 above for where
+   applyActuators(fan_pwm, heater_pwm) actually runs, gated on a fresh
+   ActuatorCommand rather than on this step).
+9. If the send succeeded, print the formatted `[TX]` telemetry line.
+10. Else, print the failure line and retain current actuator state (held
+    from the last applyActuators() call).
 
 ## 6. Evaluator Defense Guide: 10 Tough Questions Teachers Will Ask
 
@@ -456,7 +480,7 @@ Forecasting and classification no longer happen on this board at all -- see the 
 
 3. Circuitry: How do your digital outputs physically trigger relays to switch high-voltage fans and heaters?
 - Answer:
-  - Firmware outputs are PWM control signals on GPIO32/33 through LEDC channels. In hardware, these should drive MOSFET gate networks (with gate resistors already noted) or transistor relay-driver stages, not relay coils directly from GPIO. The logic layer provides duty command; power-stage isolation and flyback protection must be implemented in hardware for inductive loads.
+  - Both the fan (GPIO32) and heater (GPIO25) now use the same actuation strategy: a plain digital ON/OFF output into a relay module's IN pin, not a bare relay coil and not a PWM/MOSFET-gate speed control. Relay modules integrate their own driver transistor and flyback diode on-board, so a direct GPIO connection is the module's intended interface -- no external MOSFET/transistor stage is needed on this board's side for either actuator. High-voltage isolation and flyback protection for both loads' inductive switching are handled inside the respective relay modules themselves.
 
 4. Data Parsing: Which library parses the incoming server JSON, and how do you prevent buffer overflow attacks or low memory issues on the MCU?
 - Answer:
@@ -472,7 +496,7 @@ Forecasting and classification no longer happen on this board at all -- see the 
 
 7. Power & Hardware: What are the voltage levels (3.3V vs 5V) for your sensors and relays, and did you need logic level shifters?
 - Answer:
-  - ESP32 GPIO/ADC are 3.3V domain. GPIO34 ADC input must never exceed 3.3V; config comments explicitly require external scaling if MQ module output can approach 5V. MQ sensor supply Vc in model is 5.0V, but ADC pin sees conditioned voltage. Relay/MOSFET power stages for fan/heater are external and should include proper level compatibility and isolation as required by chosen modules.
+  - ESP32 GPIO/ADC are 3.3V domain. GPIO34 ADC input must never exceed 3.3V; config comments explicitly require external scaling if MQ module output can approach 5V. MQ sensor supply Vc in model is 5.0V, but ADC pin sees conditioned voltage. Relay power stages for fan/heater are external modules and should include proper level compatibility and isolation as required by the chosen relay hardware.
 
 8. Memory: How is RAM/Flash usage managed on these microcontrollers?
 - Answer:
@@ -492,8 +516,8 @@ Forecasting and classification no longer happen on this board at all -- see the 
 - Firmware and backend state vocabularies are byte-aligned:
   - STATE_* constants in the sensor node's firmware, and the classification strings the master node relays, must remain identical to backend EnvironmentalState values.
 - ESP-NOW packet structs must stay byte-identical across both boards:
-  - SensorPacket and ActuatorCommand are defined independently in esp32/src/main.cpp and esp32s3_master/esp32s3_master.ino (no shared header, since they're built by two different toolchains). Changing field order/types in one without the other silently breaks the link -- onDataRecv()'s length check (len != sizeof(...)) will reject the mismatched packets outright, which at least fails loudly rather than silently misinterpreting bytes.
+  - SensorPacket and ActuatorCommand are defined independently in hardware/esp32/src/main.cpp and hardware/esp32s3_master/esp32s3_master.ino (no shared header, since they're built by two different toolchains). Changing field order/types in one without the other silently breaks the link -- onDataRecv()'s length check (len != sizeof(...)) will reject the mismatched packets outright, which at least fails loudly rather than silently misinterpreting bytes.
 - Important current limitations to disclose clearly:
   - On repeated communication failures anywhere in the three-hop chain, actuator policy is hold-last-state, not explicit fail-safe override; safety strategy should be reviewed for deployment.
-  - Single sensor node, single master node only -- see esp32s3_master/README.md's "Known limitations" for what multi-node support would require.
+  - Single sensor node, single master node only -- see hardware/esp32s3_master/README.md's "Known limitations" for what multi-node support would require.
   - MAC addresses are paired manually at flash time (copy-paste from Serial Monitor output); there is no dynamic pairing/discovery handshake.

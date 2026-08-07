@@ -1,12 +1,13 @@
 # ESP32 Sensor Node -- Firmware
 
 Production-grade Arduino/ESP32 firmware for the Poultry Telemetry sensor
-node. Reads DHT22 (temperature + humidity) and MQ-137 (ammonia PPM) every
+node. Reads DHT11 (temperature + humidity) and MQ-137 (ammonia PPM) every
 5 seconds and sends them over **ESP-NOW** to the ESP32-S3 master node
 (`../esp32s3_master/`), which runs the on-device forecast/spike model and
 owns the WiFi/HTTP leg to Django. The master relays Django's classification
-back over ESP-NOW so this board can still drive its own fan and heater PWM
-outputs, closing the control loop end-to-end across the two boards.
+back over ESP-NOW so this board can still drive its own fan (PWM speed
+control) and PTC heater (active-LOW ON/OFF relay), closing the control loop
+end-to-end across the two boards.
 
 This board still joins WiFi (see `include/config.h`), but only to (a) land
 on the same channel as the master -- ESP-NOW requires both peers on the
@@ -20,10 +21,11 @@ pairing procedure required before either board can talk to the other.
 
 | Signal        | GPIO   | Socket pin | Notes |
 |---------------|--------|------------|-------|
-| `DHT_DATA`    | GPIO4  | 20         | 10 kOhm pull-up to 3V3; single-wire DHT22 protocol |
+| `DHT_DATA`    | GPIO4  | 20         | 10 kOhm pull-up to 3V3; single-wire DHT11 protocol |
 | `MQ_DATA`     | GPIO34 | 12         | INPUT-ONLY, ADC1_CH6 -- required so WiFi and ADC coexist |
-| `PWM_FAN`     | GPIO32 | 10         | LEDC ch 0, 25 kHz -- gate driven through R5 = 200 Ohm |
-| `PWM_HEATER`  | GPIO33 | 9          | LEDC ch 1, 25 kHz -- gate driven through R4 = 200 Ohm |
+| `PWM_FAN`     | GPIO32 | 10         | LEDC PWM (channel 0, 25 kHz, 8-bit) speed target to the fan's own driver IC -- not a power switch, see `FAN_ENABLE` below |
+| `FAN_ENABLE`  | GPIO27 | TBD -- verify against schematic | Digital output gating an external N-MOSFET on the fan's GND leg; HIGH = fan powered, LOW = de-energized. Real hard-off, since many cheap fans don't honor 0% PWM duty as a true stop |
+| `HEATER_RELAY`| GPIO25 | TBD -- verify against schematic | Digital output to relay module IN pin; active-LOW (LOW = heater ON). ON/OFF only, no speed control |
 | `VIN` (+5V)   | -      | 1          | USB or external 5 V bench supply |
 | `GND`         | -      | 2 / 17     | Common ground with sensor and actuator returns |
 | `3V3`         | -      | 16         | Sensor Vcc supply |
@@ -42,7 +44,7 @@ Two constraints are non-negotiable:
 ## Build and flash
 
 ```bash
-cd esp32
+cd hardware/esp32
 # Edit include/config.h: WIFI_SSID, WIFI_PASSWORD, MASTER_MAC_ADDR
 # (see the MAC pairing procedure in ../esp32s3_master/README.md), and
 # GMT_OFFSET_SEC for your timezone.
@@ -80,18 +82,33 @@ or, worse, miss real breaches.
 
 The master node POSTs each record to Django, which classifies it and
 returns `record.predicted_class`. The master relays that string back to
-this board over ESP-NOW (`ActuatorCommand`), and the firmware maps it to
-actuator state:
+this board over ESP-NOW (`ActuatorCommand`), along with **two independently
+computed bytes**: `fan_pwm` (0-255, from its on-device model's
+predicted-NH3 error) and `heater_pwm` (0-255, from the classification --
+`LOW_TEMP_ALERT` -> 255, else 0). A dashboard MANUAL override, if set,
+replaces *both* bytes with the operator's fan speed % / heater power %
+before they're sent. This board makes no actuation decisions of its own any
+more -- it only applies whatever the master sends:
 
-| Classification          | Fan  | Heater |
-|-------------------------|------|--------|
-| `CRITICAL_AMMONIA`      | ON   | OFF    |
-| `HEAT_STRESS_WARNING`   | ON   | OFF    |
-| `LOW_TEMP_ALERT`        | OFF  | ON     |
-| `OPTIMAL_ENVIRONMENT`   | OFF  | OFF    |
+| Signal          | Fan (PWM)                                          | Heater relay |
+|-----------------|-----------------------------------------------------|--------------|
+| `fan_pwm`       | Written verbatim as PWM duty (0-255)                | -- |
+| `fan_pwm > 0`   | `FAN_ENABLE` driven HIGH (powered)                  | -- |
+| `fan_pwm == 0`  | `FAN_ENABLE` driven LOW (de-energized)              | -- |
+| `heater_pwm > 0`| --                                                    | ON (relay energized) |
+| `heater_pwm == 0`| --                                                   | OFF (relay de-energized) |
 
-The interlock (fan and heater never both on) is inherent to the
-classification -- a single state is returned per record.
+**Note:** earlier revisions of this board guaranteed fan and heater were
+never both ON, since a single classification string drove both locally.
+That guarantee no longer holds -- `fan_pwm` and `heater_pwm` are computed
+independently on the master (and either can come from a MANUAL dashboard
+override, decoupled from the other), so e.g. a nonzero MANUAL fan override
+alongside a nonzero heater_pwm (MANUAL or `LOW_TEMP_ALERT`-driven) will run
+the fan and energize the heater relay simultaneously. If that combination is
+unsafe for the physical setup, it needs to be enforced explicitly (either
+server-side in the dashboard/master's `loop()`, or by forcing `fan_pwm` to 0
+in this board's `applyActuators()` whenever `heaterOn` is true) -- it is not
+currently enforced anywhere in either firmware.
 
 ## Edge-AI forecast and spike-risk prediction
 
