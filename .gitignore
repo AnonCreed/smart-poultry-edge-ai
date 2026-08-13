@@ -37,6 +37,8 @@ hardware/esp32s3_master/.pioenvs/
 
 # Credentials -- NEVER commit these
 hardware/esp32/include/credentials.h
+hardware/esp32/test_heater_relay/include/credentials.h
+hardware/esp32/test_actuator_bridge/include/credentials.h
 hardware/esp32s3_master/include/credentials.h
 hardware/esp32s3_master/credentials.h
 
