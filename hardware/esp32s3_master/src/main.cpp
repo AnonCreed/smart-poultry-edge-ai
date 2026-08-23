@@ -548,6 +548,20 @@ void loop() {
     // sensor no longer looks at `state` for this at all, see esp32/src/main.cpp).
     uint8_t heaterPwm = (strcmp(state, "LOW_TEMP_ALERT") == 0) ? 255 : 0;
 
+    // Safety floor: a live reading already past threshold forces the fan to
+    // 100% regardless of what the forecast says -- mirrors
+    // ActuatorControl.auto_duty_for_state() in telemetry/models.py. Until
+    // this, that floor existed ONLY as a number Django computed for the
+    // dashboard's AUTO display; it never reached this fanPwm calculation
+    // (which only ever looks at pred.ammonia_next above, never `state`), so
+    // a live CRITICAL_AMMONIA/HEAT_STRESS_WARNING reading with a low
+    // forecast left the dashboard reading "Fan 100%" while the physical fan
+    // sat near idle. A reading already past a safety threshold must not
+    // wait on a prediction to react.
+    if (strcmp(state, "CRITICAL_AMMONIA") == 0 || strcmp(state, "HEAT_STRESS_WARNING") == 0) {
+        fanPwm = 255;
+    }
+
     // Dashboard MANUAL override (fan speed + heater power sliders) wins over
     // the on-device MLP-predicted fanPwm and the classification-derived
     // heaterPwm computed above. AUTO leaves both as-is.
@@ -559,6 +573,10 @@ void loop() {
     }
 
     // Relay classification + fan/heater bytes back to sensor node over
-    // ESP-NOW, plus this tick's prediction (if any) for the LCD.
+    // ESP-NOW, plus this tick's prediction (if any) for the LCD. Logged
+    // here (not at the earlier "[TX] Classification" line) since fanPwm
+    // isn't final until the safety-floor/MANUAL-override adjustments above
+    // have both had a chance to run.
+    Serial.printf("[ACTUATE] fan_pwm=%u heater_pwm=%u (state=%s)\n", fanPwm, heaterPwm, state);
     sendActuatorCommand(state, fanPwm, heaterPwm, havePrediction ? &pred : nullptr);
 }
