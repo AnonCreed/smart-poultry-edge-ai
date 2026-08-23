@@ -286,6 +286,13 @@ static const BenchmarkScenario BENCHMARK_SCENARIOS[] = {
     {"HEAT_STRESS_RECOVER",        24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},
     {"LOW_TEMP_STEP",              15.0f,    15.0f,   55.0f,     55.0f,     3.0f,    3.0f},   // heater reactivity
     {"LOW_TEMP_RECOVER",           24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},
+    // Cold AND critical ammonia at once -- classify_environment() checks
+    // ammonia first, so predicted_class comes back CRITICAL_AMMONIA, never
+    // LOW_TEMP_ALERT. Regression scenario for the low_temperature_alert fix
+    // (telemetry/models.py's ActuatorControl.auto_duty_for_state()): both
+    // fan_pwm AND heater_pwm must be 255 here, not just the fan.
+    {"COLD_AND_CRITICAL_AMMONIA",  15.0f,    15.0f,   55.0f,     55.0f,    40.0f,   40.0f},
+    {"COLD_AND_CRITICAL_RECOVER",  24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},
 };
 static const size_t BENCHMARK_SCENARIO_COUNT =
     sizeof(BENCHMARK_SCENARIOS) / sizeof(BENCHMARK_SCENARIOS[0]);

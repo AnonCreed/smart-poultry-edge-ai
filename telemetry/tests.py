@@ -212,6 +212,33 @@ class ActuatorControlEndpointTests(TestCase):
         control = response.json()["control"]
         self.assertEqual(control["effective_fan_pct"], 100)
 
+    def test_auto_heater_reacts_to_low_temperature(self):
+        # Default (unconfigured) profile's low_temp_c is 18.0 -- 10.0 is
+        # comfortably below it.
+        PoultryTelemetry.objects.create(
+            temperature=10.0, humidity=50.0, ammonia_level=3.0,
+            predicted_class=EnvironmentalState.LOW_TEMP_ALERT,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["effective_heater_pct"], 100)
+
+    def test_auto_heater_not_masked_by_stored_critical_ammonia_state(self):
+        # The record's stored predicted_class is CRITICAL_AMMONIA (ammonia
+        # dominates classify_environment()'s priority order), but the
+        # temperature on the very same record is also below threshold --
+        # the heater must still react to that, not just the fan. This is
+        # the live-endpoint counterpart to
+        # SubmitEndpointTests.test_submit_low_temperature_alert_not_masked_by_critical_ammonia.
+        PoultryTelemetry.objects.create(
+            temperature=10.0, humidity=50.0, ammonia_level=40.0,
+            predicted_class=EnvironmentalState.CRITICAL_AMMONIA,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["effective_fan_pct"], 100)
+        self.assertEqual(control["effective_heater_pct"], 100)
+
     def test_manual_mode_overrides_with_saved_percentages(self):
         response = self.client.post(
             reverse("telemetry-control"),
@@ -260,6 +287,40 @@ class ActuatorControlEndpointTests(TestCase):
         body = response.json()
         self.assertEqual(response.status_code, 201)
         self.assertEqual(body["control"]["effective_fan_pct"], 77)
+        self.assertEqual(body["control"]["effective_heater_pct"], 100)
+
+    def test_submit_low_temperature_alert_true_when_genuinely_cold(self):
+        # Plain LOW_TEMP_ALERT case (nothing else in play) -- heater should
+        # be on in AUTO and low_temperature_alert should be echoed True.
+        response = self.client.post(
+            reverse("telemetry-submit"),
+            data=json.dumps({"temperature": 10.0, "humidity": 50.0, "ammonia_level": 3.0}),
+            content_type="application/json",
+        )
+        body = response.json()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(body["record"]["predicted_class"], EnvironmentalState.LOW_TEMP_ALERT)
+        self.assertTrue(body["low_temperature_alert"])
+        self.assertEqual(body["control"]["effective_heater_pct"], 100)
+
+    def test_submit_low_temperature_alert_not_masked_by_critical_ammonia(self):
+        # The bug this pair of fields exists to fix: classify_environment()
+        # checks ammonia first, so a reading that's simultaneously critical
+        # on ammonia AND genuinely cold classifies only as
+        # CRITICAL_AMMONIA -- predicted_class == LOW_TEMP_ALERT would be
+        # False here even though it's cold. low_temperature_alert must stay
+        # True regardless, and the heater must still turn on, not just the
+        # fan.
+        response = self.client.post(
+            reverse("telemetry-submit"),
+            data=json.dumps({"temperature": 10.0, "humidity": 50.0, "ammonia_level": 40.0}),
+            content_type="application/json",
+        )
+        body = response.json()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(body["record"]["predicted_class"], EnvironmentalState.CRITICAL_AMMONIA)
+        self.assertTrue(body["low_temperature_alert"])
+        self.assertEqual(body["control"]["effective_fan_pct"], 100)
         self.assertEqual(body["control"]["effective_heater_pct"], 100)
 
 

@@ -188,6 +188,7 @@ predictions once warmed up) before advancing to the next, looping forever:
 | `AMMONIA_BOUNDARY_LOW` / `_HIGH` | Held just under/over 25 ppm -- exact threshold correctness, no off-by-one. |
 | `HEAT_STRESS_STEP` / `_RECOVER` | T + RH combined past both thresholds at once (the classifier's conjunction rule) and back. |
 | `LOW_TEMP_STEP` / `_RECOVER` | Below 18°C and back -- heater relay reactivity. |
+| `COLD_AND_CRITICAL_AMMONIA` / `_RECOVER` | Cold and critical ammonia at once -- `predicted_class` comes back `CRITICAL_AMMONIA` only (classify_environment() checks ammonia first), so this is the regression case for the `low_temperature_alert` fix: both fan **and** heater must activate, not just the fan. |
 
 Add, remove, or edit entries in `BENCHMARK_SCENARIOS` for other cases (a
 different profile's thresholds, a slower/faster ramp, a longer soak at one

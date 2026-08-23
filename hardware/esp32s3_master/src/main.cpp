@@ -252,10 +252,21 @@ static bool discoverDjangoHost() {
  * fan_pwm and the classification-derived heater_pwm the caller computes.
  * All three stay false/0/0 (i.e. "no override, use AUTO/predicted") if the
  * response can't be parsed.
+ * Fills outLowTemperatureAlert from the response's top-level
+ * `low_temperature_alert` -- a raw temperature-vs-threshold check computed
+ * server-side, independent of outState. Django's classify_environment()
+ * returns one mutually-exclusive label with ammonia checked first, so a
+ * reading that's simultaneously CRITICAL_AMMONIA and genuinely cold comes
+ * back as outState="CRITICAL_AMMONIA", never "LOW_TEMP_ALERT" -- checking
+ * outState alone for the heater decision would then leave it off while
+ * it's actually cold. outLowTemperatureAlert sidesteps that masking; see
+ * telemetry/models.py's ActuatorControl.auto_duty_for_state() docstring
+ * for the full reasoning (this mirrors that same fix here).
  * Returns true on HTTP 201.
  */
 static bool postToDjango(const SensorPacket& pkt, const ModelPrediction* pred, char outState[24],
-                          bool& outManualMode, uint8_t& outManualFanPwm, uint8_t& outManualHeaterPwm) {
+                          bool& outManualMode, uint8_t& outManualFanPwm, uint8_t& outManualHeaterPwm,
+                          bool& outLowTemperatureAlert) {
     if (!g_djangoKnown) {
         Serial.println("[HTTP] Django host not discovered yet -- skipping POST.");
         return false;
@@ -295,10 +306,12 @@ static bool postToDjango(const SensorPacket& pkt, const ModelPrediction* pred, c
         outManualMode = false;      // default -- no override unless parsed below
         outManualFanPwm = 0;
         outManualHeaterPwm = 0;     // NEW
+        outLowTemperatureAlert = false;
         if (!err) {
             const char* cls = resp["record"]["predicted_class"] | "UNKNOWN";
             strncpy(outState, cls, 23);
             outState[23] = '\0';
+            outLowTemperatureAlert = resp["low_temperature_alert"] | false;
 
             // Dashboard actuator control -- MANUAL means the operator pinned
             // fan speed + heater power % from the UI, which should win over
@@ -525,7 +538,9 @@ void loop() {
     bool manualMode = false;
     uint8_t manualFanPwm = 0;
     uint8_t manualHeaterPwm = 0;   // NEW
-    if (postToDjango(pkt, havePrediction ? &pred : nullptr, state, manualMode, manualFanPwm, manualHeaterPwm)) {
+    bool lowTemperatureAlert = false;
+    if (postToDjango(pkt, havePrediction ? &pred : nullptr, state, manualMode, manualFanPwm, manualHeaterPwm,
+                      lowTemperatureAlert)) {
         consecutiveFailures = 0;
         strncpy(g_lastState, state, sizeof(g_lastState) - 1);  // for the independent MANUAL poll's log/state field
         Serial.printf("[TX] Classification: %s -- sending ActuatorCommand to sensor.\n", state);
@@ -541,12 +556,18 @@ void loop() {
         }
     }
 
-    // NEW: heater PWM byte -- classification-driven AUTO default, mirroring
-    // what the sensor node's applyActuators() used to decide locally before
-    // this became a master-computed, wire-relayed value (needed so a
-    // dashboard MANUAL heater override can actually reach the relay; the
-    // sensor no longer looks at `state` for this at all, see esp32/src/main.cpp).
-    uint8_t heaterPwm = (strcmp(state, "LOW_TEMP_ALERT") == 0) ? 255 : 0;
+    // Heater PWM byte -- driven by lowTemperatureAlert (a raw temperature-
+    // vs-threshold check Django computes independently), NOT by checking
+    // state=="LOW_TEMP_ALERT". state is a single mutually-exclusive label
+    // with ammonia checked first (see classify_environment() in
+    // telemetry/classifier.py), so a reading that's simultaneously
+    // CRITICAL_AMMONIA and genuinely cold comes back with
+    // state=="CRITICAL_AMMONIA" -- checking state alone here would then
+    // leave the heater off exactly when a chick is both gassed and
+    // freezing. lowTemperatureAlert sidesteps that masking entirely (see
+    // the postToDjango() doc comment and ActuatorControl.auto_duty_for_state()
+    // in telemetry/models.py for the full reasoning).
+    uint8_t heaterPwm = lowTemperatureAlert ? 255 : 0;
 
     // Safety floor: a live reading already past threshold forces the fan to
     // 100% regardless of what the forecast says -- mirrors

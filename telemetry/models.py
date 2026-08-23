@@ -218,9 +218,16 @@ class ActuatorControl(models.Model):
     Singleton settings row for fan/heater actuator control.
 
     AUTO (default) has two layers:
-    - Heater: classification-driven, unchanged since the original
-      sensor-only design (see `applyActuators()` in hardware/esp32/src/main.cpp)
-      -- LOW_TEMP_ALERT drives the relay, nothing else does.
+    - Heater: driven by a raw temperature-vs-threshold check
+      (`is_low_temperature`, computed by the caller -- see submit_telemetry()
+      and actuator_control() in views.py), NOT by the classification label.
+      classify_environment() returns one mutually-exclusive state with
+      ammonia checked first, so a reading that's simultaneously
+      CRITICAL_AMMONIA and genuinely cold classifies only as
+      CRITICAL_AMMONIA -- checking `state == LOW_TEMP_ALERT` would then
+      leave the heater off while it's actually cold, exactly when a chick
+      is both gassed and freezing. Checking the raw temperature directly
+      sidesteps that masking entirely.
     - Fan: predictive when the ESP32-S3 master's Edge-AI forecast is
       available, mirroring the on-device proportional control it actually
       applies to hardware (see the `fanPwm` calculation in
@@ -287,9 +294,24 @@ class ActuatorControl(models.Model):
     @classmethod
     def auto_duty_for_state(
         cls, state: str | None, predicted_ammonia: float | None = None,
+        is_low_temperature: bool = False,
     ) -> tuple[int, int]:
-        """(fan_pct, heater_pct) for AUTO mode. See the class docstring for the policy."""
-        heater_pct = 100 if state == EnvironmentalState.LOW_TEMP_ALERT else 0
+        """(fan_pct, heater_pct) for AUTO mode. See the class docstring for the policy.
+
+        heater_pct is driven by `is_low_temperature` -- a raw temperature-vs-
+        threshold check computed independently of `state` -- rather than by
+        `state == LOW_TEMP_ALERT`. classify_environment() returns a single
+        mutually-exclusive label with ammonia checked first: a reading that's
+        simultaneously CRITICAL_AMMONIA and genuinely cold classifies only as
+        CRITICAL_AMMONIA, so `state == LOW_TEMP_ALERT` would silently read
+        false and leave the heater off in exactly the case a chick is both
+        gassed and freezing. `is_low_temperature` sidesteps that by checking
+        the real temperature directly, so the heater reacts to cold whether
+        or not ammonia also happens to be critical at the same time. Fan and
+        heater are still otherwise fully independent -- this only fixes the
+        heater's *input*, not the (lack of) relationship between the two.
+        """
+        heater_pct = 100 if is_low_temperature else 0
 
         # Safety floor: a live reading already past threshold always wins,
         # regardless of what the forecast says.
@@ -306,14 +328,20 @@ class ActuatorControl(models.Model):
 
     def effective_duty(
         self, latest_state: str | None, predicted_ammonia: float | None = None,
+        is_low_temperature: bool = False,
     ) -> tuple[int, int]:
         """Resolve the (fan_pct, heater_pct) that should actually be applied right now."""
         if self.mode == ActuatorMode.MANUAL:
             return self.fan_speed_pct, self.heater_power_pct
-        return self.auto_duty_for_state(latest_state, predicted_ammonia)
+        return self.auto_duty_for_state(latest_state, predicted_ammonia, is_low_temperature)
 
-    def as_payload(self, latest_state: str | None = None, predicted_ammonia: float | None = None) -> dict:
-        effective_fan_pct, effective_heater_pct = self.effective_duty(latest_state, predicted_ammonia)
+    def as_payload(
+        self, latest_state: str | None = None, predicted_ammonia: float | None = None,
+        is_low_temperature: bool = False,
+    ) -> dict:
+        effective_fan_pct, effective_heater_pct = self.effective_duty(
+            latest_state, predicted_ammonia, is_low_temperature
+        )
         return {
             "mode": self.mode,
             "fan_speed_pct": self.fan_speed_pct,

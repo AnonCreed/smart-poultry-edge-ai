@@ -154,6 +154,16 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
         ammonia_critical_ppm=profile.active_ammonia_critical_ppm(),
     )
 
+    # Raw temperature-vs-threshold check, independent of `predicted` above.
+    # classify_environment() returns one mutually-exclusive label with
+    # ammonia checked first, so a reading that's simultaneously
+    # CRITICAL_AMMONIA and genuinely cold classifies only as
+    # CRITICAL_AMMONIA -- `predicted == LOW_TEMP_ALERT` would then be False
+    # even though it's cold. ActuatorControl's heater duty needs this raw
+    # boolean instead, so cold stress is never silently masked by ammonia
+    # (see ActuatorControl.auto_duty_for_state()'s docstring).
+    is_low_temperature = values["temperature"] < low_temp_c
+
     record = PoultryTelemetry.objects.create(
         predicted_class=predicted, **values, **predictions
     )
@@ -193,7 +203,15 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
         {
             "status": "ok",
             "record": record.as_payload(),
-            "control": control.as_payload(record.predicted_class, record.predicted_ammonia),
+            "control": control.as_payload(record.predicted_class, record.predicted_ammonia, is_low_temperature),
+            # Relayed separately (not just baked into `control`) so the
+            # master's own on-device AUTO heater logic can check this raw
+            # boolean directly instead of re-deriving it from
+            # predicted_class -- see the ActuatorCommand comment in
+            # hardware/esp32s3_master/src/main.cpp for why that string
+            # alone isn't enough (ammonia-critical + cold both true at once
+            # would otherwise mask the cold condition).
+            "low_temperature_alert": is_low_temperature,
         },
         status=201,
     )
@@ -350,10 +368,17 @@ def actuator_control(request: HttpRequest) -> JsonResponse:
     latest_state = latest.predicted_class if latest else None
     latest_predicted_ammonia = latest.predicted_ammonia if latest else None
 
+    # Raw temperature-vs-threshold check against the *current* active
+    # profile, independent of latest_state -- see auto_duty_for_state()'s
+    # docstring for why the classification label alone can silently mask a
+    # simultaneous cold + critical-ammonia reading.
+    low_temp_c, _heat_stress_temp_c = FlockProfile.current().active_temperature_band()
+    latest_is_low_temperature = latest is not None and latest.temperature < low_temp_c
+
     if request.method == "GET":
         return JsonResponse({
             "status": "ok",
-            "control": control.as_payload(latest_state, latest_predicted_ammonia),
+            "control": control.as_payload(latest_state, latest_predicted_ammonia, latest_is_low_temperature),
         })
 
     try:
@@ -393,7 +418,7 @@ def actuator_control(request: HttpRequest) -> JsonResponse:
     control.save()
     return JsonResponse({
         "status": "ok",
-        "control": control.as_payload(latest_state, latest_predicted_ammonia),
+        "control": control.as_payload(latest_state, latest_predicted_ammonia, latest_is_low_temperature),
     })
 
 
