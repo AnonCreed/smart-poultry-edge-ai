@@ -120,6 +120,14 @@ static float g_lcdHumidity    = 0.0f;
 static float g_lcdAmmonia     = 0.0f;
 static bool  g_haveReading    = false;
 
+// Set once at boot by an I2C presence probe (see setup()) -- false if
+// nothing ACKs at LCD_I2C_ADDR, so a missing/unresponsive LCD (loose wire,
+// disconnected during a bench test) is skipped entirely rather than
+// hanging in lcd.init()'s internal I2C writes long enough to trip the
+// watchdog and reset the board in a loop. All lcd.*/lcdPrintRow() calls
+// become no-ops when this is false.
+static bool g_lcdPresent = false;
+
 // ============================================================================
 // WiFi lifecycle
 // ============================================================================
@@ -331,6 +339,7 @@ static void sampleBenchmark(float& temperatureC, float& humidityPct, float& ammo
  * a hardcoded literal, so this stays correct if LCD_COLS is ever changed.
  */
 static void lcdPrintRow(uint8_t row, const char* text) {
+    if (!g_lcdPresent) return;
     char buf[LCD_COLS + 1];
     snprintf(buf, sizeof(buf), "%-*s", LCD_COLS, text);
     buf[LCD_COLS] = '\0';  // truncate defensively if text ran long
@@ -344,6 +353,7 @@ static void lcdPrintRow(uint8_t row, const char* text) {
  * again every time a fresh DHT11/MQ-137 sample completes.
  */
 static void updateLcd() {
+    if (!g_lcdPresent) return;
     char line0[LCD_COLS + 1];
     char line1[LCD_COLS + 1];
 
@@ -496,17 +506,36 @@ void setup() {
     // LCD -- explicit Wire.begin(SDA, SCL) rather than relying on the
     // board's default I2C pins, so this stays correct even on a DevKit
     // variant whose defaults differ from GPIO21/22.
+    //
+    // Probed with a bounded I2C transaction BEFORE calling lcd.init() --
+    // that library's init sequence issues several of its own I2C writes
+    // internally, and a missing/unresponsive LCD (loose wire, disconnected
+    // for a bench test) can leave the bus in a state that hangs well past
+    // Wire's nominal per-call timeout, long enough to trip the watchdog and
+    // reset the board -- which then hits the same hang on the next boot,
+    // forever. g_lcdPresent gates every later lcd.*/lcdPrintRow() call, so
+    // a board with no LCD attached just runs without one instead of
+    // boot-looping.
     Wire.begin(PIN_LCD_SDA, PIN_LCD_SCL);
-    lcd.init();
-    lcd.backlight();
+    Wire.setTimeOut(50);  // ms, explicit rather than relying on the library default.
+    Wire.beginTransmission(LCD_I2C_ADDR);
+    g_lcdPresent = (Wire.endTransmission() == 0);
+    if (g_lcdPresent) {
+        lcd.init();
+        lcd.backlight();
 #ifdef BENCHMARK_MODE
-    lcdPrintRow(0, "** BENCHMARK **");
-    lcdPrintRow(1, "Fake data!");
-    delay(1500);  // Long enough to actually read before it starts cycling.
+        lcdPrintRow(0, "** BENCHMARK **");
+        lcdPrintRow(1, "Fake data!");
+        delay(1500);  // Long enough to actually read before it starts cycling.
 #else
-    lcdPrintRow(0, "Poultry Telem.");
-    lcdPrintRow(1, "Booting...");
+        lcdPrintRow(0, "Poultry Telem.");
+        lcdPrintRow(1, "Booting...");
 #endif
+    } else {
+        Serial.printf("[LCD] No response at I2C address 0x%02X -- LCD disabled "
+                      "for this boot (check wiring/power). Continuing without it.\n",
+                      LCD_I2C_ADDR);
+    }
 
     connectWifi();
     syncNtpTime();
