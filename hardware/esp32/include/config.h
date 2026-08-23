@@ -139,9 +139,3 @@
 #define LCD_I2C_ADDR     0x27
 #define LCD_COLS         16
 #define LCD_ROWS         2
-
-// How long each of the three rotating screens (live T/RH, live NH3, model
-// prediction) stays up before swapping. Deliberately independent of
-// SAMPLE_INTERVAL_MS -- the display rotates on its own cadence regardless of
-// how often fresh data actually arrives.
-#define LCD_SCREEN_MS    3000

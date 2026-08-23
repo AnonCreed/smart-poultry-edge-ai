@@ -124,18 +124,20 @@ model details and the spike-risk threshold.
 ## LCD (I2C 16x2, RG1602A-IIC(P) / PCF8574T backpack)
 
 Wired to the DevKit's hardware I2C bus (`include/config.h`: `PIN_LCD_SDA` =
-GPIO21, `PIN_LCD_SCL` = GPIO22; GND to GND, VCC to VIN/5V). Rotates through
-three screens every `LCD_SCREEN_MS` (3 s by default), independent of the 5 s
-sample cadence:
+GPIO21, `PIN_LCD_SCL` = GPIO22; GND to GND, VCC to VIN/5V). Shows a static
+two-line readout of this board's own current reading -- no rotation, no
+forecast:
 
-1. **Live Reading** -- current temperature + humidity from the DHT11.
-2. **Ammonia (NH3)** -- current MQ-137 PPM reading.
-3. **Predicted** -- `predicted_temperature` / `predicted_ammonia` relayed
-   back from the master's on-device model, in the extended `ActuatorCommand`
-   (`has_prediction`, `predicted_temperature`, `predicted_ammonia` -- see the
-   wire-contract comment above `struct ActuatorCommand` in `src/main.cpp`).
-   Shows "Warming up..." until the master's model has filled its rolling
-   window (~30-40 s after boot) and a first prediction actually exists.
+- **Row 0** -- current temperature + humidity from the DHT11 (`T:25.3C H:60%`).
+- **Row 1** -- current MQ-137 ammonia reading (`NH3: 12.3 ppm`).
+
+Both rows redraw every time a fresh sample completes (`SAMPLE_INTERVAL_MS`,
+5 s by default); before the first successful reading they show a boot
+placeholder instead. The master still relays back `predicted_temperature`/
+`predicted_ammonia`/`has_prediction` on the `ActuatorCommand` wire contract
+(see the comment above `struct ActuatorCommand` in `src/main.cpp`) -- this
+board receives them but intentionally doesn't display them; the LCD is
+current-data-only on this branch.
 
 The backpack answers at I2C address `0x27` by default (`LCD_I2C_ADDR` in
 `config.h`); some PCF8574AT clones use `0x3F` instead -- if the display stays
