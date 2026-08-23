@@ -6,8 +6,9 @@ node. Reads DHT11 (temperature + humidity) and MQ-137 (ammonia PPM) every
 (`../esp32s3_master/`), which runs the on-device forecast/spike model and
 owns the WiFi/HTTP leg to Django. The master relays Django's classification
 back over ESP-NOW so this board can still drive its own fan (PWM speed
-control) and PTC heater (active-LOW ON/OFF relay), closing the control loop
-end-to-end across the two boards.
+control) and PTC heater (ON/OFF relay -- see `HEATER_RELAY_ON`/`_OFF` in
+`include/config.h` for this board's relay polarity), closing the control
+loop end-to-end across the two boards.
 
 This board still joins WiFi (see `include/config.h`), but only to (a) land
 on the same channel as the master -- ESP-NOW requires both peers on the
@@ -25,7 +26,7 @@ pairing procedure required before either board can talk to the other.
 | `MQ_DATA`     | GPIO34 | 12         | INPUT-ONLY, ADC1_CH6 -- required so WiFi and ADC coexist |
 | `PWM_FAN`     | GPIO32 | 10         | LEDC PWM (channel 0, 25 kHz, 8-bit) speed target to the fan's own driver IC -- not a power switch, see `FAN_ENABLE` below |
 | `FAN_ENABLE`  | GPIO27 | TBD -- verify against schematic | Digital output gating an external N-MOSFET on the fan's GND leg; HIGH = fan powered, LOW = de-energized. Real hard-off, since many cheap fans don't honor 0% PWM duty as a true stop |
-| `HEATER_RELAY`| GPIO25 | TBD -- verify against schematic | Digital output to relay module IN pin; active-LOW (LOW = heater ON). ON/OFF only, no speed control |
+| `HEATER_RELAY`| GPIO25 | TBD -- verify against schematic | Digital output to relay module IN pin; HIGH = heater ON, LOW = OFF (`HEATER_RELAY_ON`/`_OFF` in `config.h` -- confirmed by bench test 2026-08-23, opposite of the module's original active-LOW assumption). ON/OFF only, no speed control |
 | `LCD_SDA`     | GPIO21 | TBD -- verify against schematic | I2C data to the LCD's PCF8574T backpack. ESP32 DevKit V1 hardware I2C default |
 | `LCD_SCL`     | GPIO22 | TBD -- verify against schematic | I2C clock to the LCD's PCF8574T backpack. ESP32 DevKit V1 hardware I2C default |
 | `VIN` (+5V)   | -      | 1          | USB or external 5 V bench supply; also feeds the LCD's VCC |

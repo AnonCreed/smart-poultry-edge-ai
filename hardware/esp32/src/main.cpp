@@ -13,9 +13,9 @@
 //      forwards the combined record to Django.
 //   4. Receive fan_pwm/heater_pwm bytes back from the master over ESP-NOW
 //      (both fully computed there, including any dashboard MANUAL override)
-//      and apply them: fan (PWM speed) and PTC heater (active-LOW relay,
-//      ON/OFF only), closing the environmental control loop end-to-end
-//      across two boards.
+//      and apply them: fan (PWM speed) and PTC heater (ON/OFF relay --
+//      see HEATER_RELAY_ON/OFF in config.h for this board's polarity),
+//      closing the environmental control loop end-to-end across two boards.
 //   5. Drive a 16x2 I2C LCD (RG1602A-IIC(P), PCF8574T backpack, SDA=GPIO21/
 //      SCL=GPIO22) showing this board's own current temperature/humidity/
 //      ammonia reading -- current data only, no forecast, no actuation
@@ -349,8 +349,9 @@ static bool sendSample(float temperatureC, float humidityPct, float ammoniaPpm) 
  * any dashboard MANUAL override) are made entirely on the master now -- this
  * board just applies whatever it's told, with no local reference to `state`:
  *   fan_pwm    -> fan PWM duty (proportional, real speed control)
- *   heater_pwm -> heater relay ON iff nonzero, OFF otherwise (active-LOW
- *                 relay -- no speed target)
+ *   heater_pwm -> heater relay ON iff nonzero, OFF otherwise (see
+ *                 HEATER_RELAY_ON/OFF in config.h for this board's relay
+ *                 polarity -- no speed target either way)
  *
  * NOTE: fan and heater are NOT interlocked -- both bytes are independent, so
  * e.g. a nonzero MANUAL fan override alongside a nonzero heater_pwm (MANUAL
@@ -394,8 +395,9 @@ void setup() {
     pinMode(PIN_FAN_ENABLE, OUTPUT);
     digitalWrite(PIN_FAN_ENABLE, LOW);
 
-    // Heater relay -- active-LOW module, so OFF is HIGH. Set before anything
-    // else runs so the relay doesn't glitch energized on boot.
+    // Heater relay -- see HEATER_RELAY_ON/OFF in config.h for this board's
+    // polarity. Set before anything else runs so the relay doesn't glitch
+    // energized on boot.
     pinMode(PIN_HEATER_RELAY, OUTPUT);
     digitalWrite(PIN_HEATER_RELAY, HEATER_RELAY_OFF);
 

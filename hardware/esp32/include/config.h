@@ -87,13 +87,18 @@
 #define PWM_DUTY_OFF        0
 
 // Heater relay control. The PTC heater is switched by a plain relay
-// module -- ON/OFF only, no speed target. The module is active-LOW: driving
-// the pin LOW energizes the relay coil (heater ON), HIGH de-energizes it
-// (heater OFF). GPIO25 is general-purpose/non-strapping and otherwise
-// unused on this board.
+// module -- ON/OFF only, no speed target. Originally assumed active-LOW
+// (LOW energizes the coil), but bench testing showed the physical heater
+// runs OPPOSITE to the commanded state -- driving the pin LOW turns the
+// heater OFF and HIGH turns it ON. That's consistent with either an
+// active-HIGH relay module (this one energizes on HIGH, not LOW) or the
+// heater's load being wired to the relay's NC (normally-closed) contact
+// instead of NO (normally-open) -- either way, the fix is the same: flip
+// which logic level means "on". GPIO25 is general-purpose/non-strapping
+// and otherwise unused on this board.
 #define PIN_HEATER_RELAY  25
-#define HEATER_RELAY_ON    LOW
-#define HEATER_RELAY_OFF   HIGH
+#define HEATER_RELAY_ON    HIGH
+#define HEATER_RELAY_OFF   LOW
 
 // ---------------------------------------------------------------------------
 // MQ-137 characteristic-curve calibration
