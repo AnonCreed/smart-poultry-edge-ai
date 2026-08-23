@@ -111,6 +111,13 @@ send `ActuatorCommand`s back.
    response and is relayed to the sensor node over ESP-NOW so it can drive
    its fan/heater -- independent of the spike-risk prediction, which is an
    advisory signal only and never itself flips the classification.
+6. The same `ActuatorCommand` also carries `has_prediction` +
+   `predicted_temperature` + `predicted_ammonia` (the just-computed
+   `pred.temperature_next` / `pred.ammonia_next`, or the last cached
+   prediction when this send is the independent MANUAL-override poll rather
+   than a fresh inference -- see `g_lastPrediction` in `main.cpp`) purely so
+   the sensor node's LCD can show a "Predicted" screen. These three fields
+   are display-only; no actuation decision reads them back on either board.
 
 ## Spike-risk threshold
 

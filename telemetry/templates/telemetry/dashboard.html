@@ -154,12 +154,16 @@
                 <hr class="my-4">
 
                 <!-- ---- Actuator control ----
-                     AUTO mirrors the sensor node's classification-driven fan/heater
-                     mapping; MANUAL lets the operator pin fan speed and heater state
-                     directly. Fan is real PWM (0-100% slider); heater is relay-switched,
-                     on/off only, no variable power. Effective duty (what's actually
-                     applied right now) is always shown regardless of mode, so AUTO's
-                     derived duty is visible too, not just the manual controls. -->
+                     AUTO drives the heater from the live classification (LOW_TEMP_ALERT
+                     only) and the fan predictively from the Edge-AI ammonia forecast,
+                     mirroring the ESP32-S3 master's on-device control loop -- with a
+                     safety floor forcing the fan to 100% on a live CRITICAL_AMMONIA/
+                     HEAT_STRESS_WARNING reading regardless of the forecast. MANUAL lets
+                     the operator pin fan speed and heater state directly. Fan is real
+                     PWM (0-100% slider); heater is relay-switched, on/off only, no
+                     variable power. Effective duty (what's actually applied right now)
+                     is always shown regardless of mode, so AUTO's derived duty is
+                     visible too, not just the manual controls. -->
                 <div aria-label="Fan and heater actuator control">
                   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
                     <h3 class="h6 mb-0">Actuator control</h3>

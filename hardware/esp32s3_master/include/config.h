@@ -69,4 +69,18 @@ struct ActuatorCommand {
                           // 255, else 0), or a dashboard MANUAL override
                           // (main.cpp) -- sensor's heater is a plain relay,
                           // so it just thresholds this at >0.
+    uint8_t has_prediction;       // NEW: 1 once the on-device model has
+                                   // warmed up and predicted_temperature/
+                                   // predicted_ammonia below are valid; 0
+                                   // during the ~30-40s warm-up window right
+                                   // after boot, in which case the sensor
+                                   // node's LCD shows a placeholder instead.
+    float predicted_temperature;  // NEW: model_runner's temperature_next,
+                                   // relayed purely for display on the
+                                   // sensor node's LCD -- not used for
+                                   // actuation (fan_pwm above already
+                                   // encodes the model's ammonia-error
+                                   // decision).
+    float predicted_ammonia;      // NEW: model_runner's ammonia_next, same
+                                   // display-only purpose as above.
 };

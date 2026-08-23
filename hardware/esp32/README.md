@@ -26,8 +26,10 @@ pairing procedure required before either board can talk to the other.
 | `PWM_FAN`     | GPIO32 | 10         | LEDC PWM (channel 0, 25 kHz, 8-bit) speed target to the fan's own driver IC -- not a power switch, see `FAN_ENABLE` below |
 | `FAN_ENABLE`  | GPIO27 | TBD -- verify against schematic | Digital output gating an external N-MOSFET on the fan's GND leg; HIGH = fan powered, LOW = de-energized. Real hard-off, since many cheap fans don't honor 0% PWM duty as a true stop |
 | `HEATER_RELAY`| GPIO25 | TBD -- verify against schematic | Digital output to relay module IN pin; active-LOW (LOW = heater ON). ON/OFF only, no speed control |
-| `VIN` (+5V)   | -      | 1          | USB or external 5 V bench supply |
-| `GND`         | -      | 2 / 17     | Common ground with sensor and actuator returns |
+| `LCD_SDA`     | GPIO21 | TBD -- verify against schematic | I2C data to the LCD's PCF8574T backpack. ESP32 DevKit V1 hardware I2C default |
+| `LCD_SCL`     | GPIO22 | TBD -- verify against schematic | I2C clock to the LCD's PCF8574T backpack. ESP32 DevKit V1 hardware I2C default |
+| `VIN` (+5V)   | -      | 1          | USB or external 5 V bench supply; also feeds the LCD's VCC |
+| `GND`         | -      | 2 / 17     | Common ground with sensor and actuator returns, and the LCD |
 | `3V3`         | -      | 16         | Sensor Vcc supply |
 
 Two constraints are non-negotiable:
@@ -118,3 +120,26 @@ master's real TFLite Micro model, which produces `predicted_temperature`,
 `predicted_ammonia`, and `predicted_spike_probability` from a rolling window
 of this board's raw readings. See `../esp32s3_master/README.md` for the
 model details and the spike-risk threshold.
+
+## LCD (I2C 16x2, RG1602A-IIC(P) / PCF8574T backpack)
+
+Wired to the DevKit's hardware I2C bus (`include/config.h`: `PIN_LCD_SDA` =
+GPIO21, `PIN_LCD_SCL` = GPIO22; GND to GND, VCC to VIN/5V). Rotates through
+three screens every `LCD_SCREEN_MS` (3 s by default), independent of the 5 s
+sample cadence:
+
+1. **Live Reading** -- current temperature + humidity from the DHT11.
+2. **Ammonia (NH3)** -- current MQ-137 PPM reading.
+3. **Predicted** -- `predicted_temperature` / `predicted_ammonia` relayed
+   back from the master's on-device model, in the extended `ActuatorCommand`
+   (`has_prediction`, `predicted_temperature`, `predicted_ammonia` -- see the
+   wire-contract comment above `struct ActuatorCommand` in `src/main.cpp`).
+   Shows "Warming up..." until the master's model has filled its rolling
+   window (~30-40 s after boot) and a first prediction actually exists.
+
+The backpack answers at I2C address `0x27` by default (`LCD_I2C_ADDR` in
+`config.h`); some PCF8574AT clones use `0x3F` instead -- if the display stays
+blank after wiring is confirmed correct, run an I2C scanner sketch to find
+the real address before assuming a wiring fault. Requires the
+`marcoschwartz/LiquidCrystal_I2C` library, pulled automatically via
+`platformio.ini`'s `lib_deps`.

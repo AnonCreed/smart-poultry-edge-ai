@@ -51,6 +51,20 @@ static bool           g_djangoKnown = false;
 // cosmetic). Updated whenever a real ingestion round-trip succeeds.
 static char g_lastState[24] = "OPTIMAL_ENVIRONMENT";
 
+// Last successful on-device model prediction, cached so the independent
+// MANUAL-override poll below (which runs on its own timer, decoupled from
+// sensor packets) can still relay it to the sensor node's LCD instead of
+// blanking the "Predicted" screen back to a warm-up placeholder every time
+// a MANUAL command goes out.
+static ModelPrediction g_lastPrediction;
+static bool            g_havePrediction = false;
+
+// Forward declarations -- ensureWifi() (below) needs to re-run ESP-NOW
+// bring-up after a reconnect, but initEspNow()/registerSensorPeer() are
+// defined further down alongside the rest of the ESP-NOW callbacks.
+static bool initEspNow();
+static void registerSensorPeer();
+
 // ----------------------------------------------------------------------------
 // WiFi helpers
 // ----------------------------------------------------------------------------
@@ -78,9 +92,30 @@ static void ensureWifi() {
     Serial.println("[WIFI] Link lost -- reconnecting.");
     WiFi.disconnect(true, true);
     connectWifi();
+
     // Re-init ESP-NOW after WiFi reconnect (channel may have changed).
+    // CRITICAL: esp_now_deinit() wipes BOTH the registered send/recv
+    // callbacks (only ever set up once, in initEspNow() from setup()) AND
+    // the peer table -- if either isn't redone here, the board goes
+    // silently deaf (never fires onDataRecv for incoming SensorPackets) or
+    // mute (esp_now_send() to the now-unregistered sensor peer fails) over
+    // ESP-NOW, permanently, until the next full power-cycle. This is the
+    // most likely failure mode on a board running off external/battery
+    // power where WiFi drops (brownouts, AP roaming, signal dropouts) are
+    // routine rather than rare -- a board on USB power during development
+    // may simply never hit this path, masking the bug until field
+    // deployment. initEspNow() re-registers the callbacks; if the sensor's
+    // MAC was already learned from an earlier packet, registerSensorPeer()
+    // re-adds it so ActuatorCommands (fan/heater duty, LCD predictions)
+    // can keep flowing back to it too.
     esp_now_deinit();
-    esp_now_init();
+    if (!initEspNow()) {
+        Serial.println("[ESPNOW] Re-init after WiFi reconnect failed -- "
+                        "sensor RX and actuator relay are down until next reset.");
+    } else if (g_sensorKnown) {
+        registerSensorPeer();
+    }
+
     // A reconnect can mean a new DHCP lease -- possibly for the Django PC
     // too -- so don't trust the previously-discovered host anymore.
     g_djangoKnown = false;
@@ -290,14 +325,36 @@ static bool postToDjango(const SensorPacket& pkt, const ModelPrediction* pred, c
     return false;
 }
 
-/** Relay one ActuatorCommand to the sensor node over ESP-NOW, if its MAC is known. */
-static void sendActuatorCommand(const char* state, uint8_t fanPwm, uint8_t heaterPwm) {
+/**
+ * Relay one ActuatorCommand to the sensor node over ESP-NOW, if its MAC is
+ * known. `pred` is null while the on-device model is still warming up --
+ * has_prediction/predicted_temperature/predicted_ammonia are sent as
+ * 0/0.0/0.0 in that case, and the sensor node's LCD shows a placeholder
+ * instead of stale/zeroed numbers (see g_havePrediction there).
+ */
+static void sendActuatorCommand(const char* state, uint8_t fanPwm, uint8_t heaterPwm,
+                                 const ModelPrediction* pred) {
     if (!g_sensorKnown) return;
     ActuatorCommand cmd{};
     strncpy(cmd.state, state, sizeof(cmd.state) - 1);
     cmd.fan_pwm = fanPwm;
     cmd.heater_pwm = heaterPwm;
-    esp_now_send(g_sensorMac, reinterpret_cast<const uint8_t*>(&cmd), sizeof(cmd));
+    cmd.has_prediction = (pred != nullptr) ? 1 : 0;
+    cmd.predicted_temperature = (pred != nullptr) ? pred->temperature_next : 0.0f;
+    cmd.predicted_ammonia = (pred != nullptr) ? pred->ammonia_next : 0.0f;
+
+    // Check the synchronous return, not just onDataSent's async delivery
+    // status -- a send to an unregistered peer (e.g. the peer-table wipe in
+    // ensureWifi() this comment used to warn about) fails right here with
+    // no callback ever firing, so onDataSent's failure log alone would never
+    // catch it. This is what makes that class of bug diagnosable from the
+    // serial log instead of just going silently mute.
+    const esp_err_t result = esp_now_send(
+        g_sensorMac, reinterpret_cast<const uint8_t*>(&cmd), sizeof(cmd));
+    if (result != ESP_OK) {
+        Serial.printf("[ESPNOW] ActuatorCommand send call failed immediately (err=%d) "
+                      "-- sensor peer may not be registered.\n", result);
+    }
 }
 
 /**
@@ -410,7 +467,8 @@ void loop() {
             if (fetchManualControl(manualFanPwm, manualHeaterPwm)) {
                 Serial.printf("[CONTROL] Independent poll -- MANUAL fan_pwm=%u heater_pwm=%u (state=%s)\n",
                               manualFanPwm, manualHeaterPwm, g_lastState);
-                sendActuatorCommand(g_lastState, manualFanPwm, manualHeaterPwm);
+                sendActuatorCommand(g_lastState, manualFanPwm, manualHeaterPwm,
+                                    g_havePrediction ? &g_lastPrediction : nullptr);
             }
         }
     }
@@ -444,6 +502,8 @@ void loop() {
         Serial.printf("[MODEL] next T=%.2fC NH3=%.2fppm spike_prob=%.4f spike=%d\n",
                       pred.temperature_next, pred.ammonia_next,
                       pred.spike_probability, pred.spike_predicted);
+        g_lastPrediction = pred;
+        g_havePrediction = true;
     } else {
         Serial.println("[MODEL] warming up -- not enough history yet.");
     }
@@ -498,6 +558,7 @@ void loop() {
         heaterPwm = manualHeaterPwm;
     }
 
-    // Relay classification + fan/heater bytes back to sensor node over ESP-NOW.
-    sendActuatorCommand(state, fanPwm, heaterPwm);
+    // Relay classification + fan/heater bytes back to sensor node over
+    // ESP-NOW, plus this tick's prediction (if any) for the LCD.
+    sendActuatorCommand(state, fanPwm, heaterPwm, havePrediction ? &pred : nullptr);
 }

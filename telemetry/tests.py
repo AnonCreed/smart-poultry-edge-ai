@@ -183,6 +183,35 @@ class ActuatorControlEndpointTests(TestCase):
         self.assertEqual(control["effective_fan_pct"], 100)
         self.assertEqual(control["effective_heater_pct"], 0)
 
+    def test_auto_fan_is_predictive_when_forecast_available(self):
+        # OPTIMAL_ENVIRONMENT live reading, but the Edge-AI forecast sees
+        # ammonia building toward the 5 ppm setpoint -- fan should scale
+        # proportionally (15 ppm error / 25 ppm scale -> 60%), mirroring
+        # hardware/esp32s3_master/src/main.cpp's fanPwm calculation, not
+        # sit at 0% just because the live classification is still OK.
+        PoultryTelemetry.objects.create(
+            temperature=25.0, humidity=50.0, ammonia_level=3.0,
+            predicted_class=EnvironmentalState.OPTIMAL_ENVIRONMENT,
+            predicted_ammonia=20.0,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["effective_fan_pct"], 60)
+        self.assertEqual(control["effective_heater_pct"], 0)
+
+    def test_auto_fan_safety_floor_ignores_low_forecast_during_critical_reading(self):
+        # A live CRITICAL_AMMONIA reading must force the fan to 100% even if
+        # the forecast alone would call for less -- the safety floor always
+        # wins over the predictive leg.
+        PoultryTelemetry.objects.create(
+            temperature=25.0, humidity=50.0, ammonia_level=40.0,
+            predicted_class=EnvironmentalState.CRITICAL_AMMONIA,
+            predicted_ammonia=6.0,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["effective_fan_pct"], 100)
+
     def test_manual_mode_overrides_with_saved_percentages(self):
         response = self.client.post(
             reverse("telemetry-control"),

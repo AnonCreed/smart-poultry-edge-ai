@@ -217,15 +217,28 @@ class ActuatorControl(models.Model):
     """
     Singleton settings row for fan/heater actuator control.
 
-    AUTO (default) reproduces the sensor node's original classification ->
-    duty mapping (see `applyActuators()` in hardware/esp32/src/main.cpp):
-    CRITICAL_AMMONIA/HEAT_STRESS_WARNING drive the fan, LOW_TEMP_ALERT drives
-    the heater, OPTIMAL_ENVIRONMENT is both-off. MANUAL lets an operator pin
-    fan speed and heater state directly from the dashboard, independent
-    of the live classification -- ingestion still classifies and persists
-    the environmental state as normal either way; only the *actuator* duty
-    is overridden. The heater is relay-switched (on/off only, no variable
-    power) -- only the fan has real PWM speed control.
+    AUTO (default) has two layers:
+    - Heater: classification-driven, unchanged since the original
+      sensor-only design (see `applyActuators()` in hardware/esp32/src/main.cpp)
+      -- LOW_TEMP_ALERT drives the relay, nothing else does.
+    - Fan: predictive when the ESP32-S3 master's Edge-AI forecast is
+      available, mirroring the on-device proportional control it actually
+      applies to hardware (see the `fanPwm` calculation in
+      hardware/esp32s3_master/src/main.cpp) -- duty scales with forecast
+      ammonia error above a 5 ppm setpoint, not the live reading. A live
+      CRITICAL_AMMONIA/HEAT_STRESS_WARNING reading always forces the fan to
+      100% regardless of the forecast, since a reading already past the
+      safety threshold must not wait on a prediction to react. Falls back
+      to the pre-ESP32S3-link binary classification mapping (fan 100% on
+      CRITICAL_AMMONIA/HEAT_STRESS_WARNING, else 0%) when no forecast is
+      available yet.
+
+    MANUAL lets an operator pin fan speed and heater state directly from
+    the dashboard, independent of the live classification -- ingestion
+    still classifies and persists the environmental state as normal either
+    way; only the *actuator* duty is overridden. The heater is
+    relay-switched (on/off only, no variable power) -- only the fan has
+    real PWM speed control.
 
     Effective duty is resolved server-side (not on-device) so a firmware
     client only has to relay one ready-to-apply command rather than
@@ -264,23 +277,43 @@ class ActuatorControl(models.Model):
         obj, _ = cls.objects.get_or_create(pk=cls.SINGLETON_ID)
         return obj
 
-    @staticmethod
-    def auto_duty_for_state(state: str | None) -> tuple[int, int]:
-        """(fan_pct, heater_pct) for AUTO mode -- mirrors the firmware's applyActuators()."""
-        if state in (EnvironmentalState.CRITICAL_AMMONIA, EnvironmentalState.HEAT_STRESS_WARNING):
-            return 100, 0
-        if state == EnvironmentalState.LOW_TEMP_ALERT:
-            return 0, 100
-        return 0, 0
+    # Fan setpoint/scale for the predictive AUTO leg -- must stay numerically
+    # identical to the `nh3_error`/`pwm` calculation in hardware/esp32s3_master/
+    # src/main.cpp's loop(), or the dashboard's displayed effective_fan_pct
+    # drifts from what the master is actually driving to the real fan.
+    AUTO_FAN_AMMONIA_SETPOINT_PPM = 5.0
+    AUTO_FAN_AMMONIA_SCALE_PPM = 25.0
 
-    def effective_duty(self, latest_state: str | None) -> tuple[int, int]:
+    @classmethod
+    def auto_duty_for_state(
+        cls, state: str | None, predicted_ammonia: float | None = None,
+    ) -> tuple[int, int]:
+        """(fan_pct, heater_pct) for AUTO mode. See the class docstring for the policy."""
+        heater_pct = 100 if state == EnvironmentalState.LOW_TEMP_ALERT else 0
+
+        # Safety floor: a live reading already past threshold always wins,
+        # regardless of what the forecast says.
+        if state in (EnvironmentalState.CRITICAL_AMMONIA, EnvironmentalState.HEAT_STRESS_WARNING):
+            return 100, heater_pct
+
+        if predicted_ammonia is not None:
+            nh3_error = max(predicted_ammonia - cls.AUTO_FAN_AMMONIA_SETPOINT_PPM, 0.0)
+            fan_pct = round(min(nh3_error / cls.AUTO_FAN_AMMONIA_SCALE_PPM, 1.0) * 100)
+            return fan_pct, heater_pct
+
+        # No forecast yet (Edge-AI link not up) -- pre-ESP32S3-link fallback.
+        return 0, heater_pct
+
+    def effective_duty(
+        self, latest_state: str | None, predicted_ammonia: float | None = None,
+    ) -> tuple[int, int]:
         """Resolve the (fan_pct, heater_pct) that should actually be applied right now."""
         if self.mode == ActuatorMode.MANUAL:
             return self.fan_speed_pct, self.heater_power_pct
-        return self.auto_duty_for_state(latest_state)
+        return self.auto_duty_for_state(latest_state, predicted_ammonia)
 
-    def as_payload(self, latest_state: str | None = None) -> dict:
-        effective_fan_pct, effective_heater_pct = self.effective_duty(latest_state)
+    def as_payload(self, latest_state: str | None = None, predicted_ammonia: float | None = None) -> dict:
+        effective_fan_pct, effective_heater_pct = self.effective_duty(latest_state, predicted_ammonia)
         return {
             "mode": self.mode,
             "fan_speed_pct": self.fan_speed_pct,

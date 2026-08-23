@@ -120,3 +120,28 @@
 // ADC full-scale: 12-bit resolution, 11 dB attenuation -> 0..3.3 V.
 #define ADC_MAX_COUNTS   4095.0f
 #define ADC_MAX_VOLTS    3.3f
+
+// ---------------------------------------------------------------------------
+// LCD -- I2C 16x2 (RG1602A-IIC(P), PCF8574T I2C backpack)
+// ---------------------------------------------------------------------------
+// Wired to the DevKit's hardware I2C bus, not a dedicated pair in the KiCad
+// schematic -- GND to GND, VCC to VIN/5V (the PCF8574T backpack and the
+// LCD's own logic run happily off 5V; the I2C lines are open-drain and the
+// backpack's pull-ups reference its own VCC, so 5V here does not endanger
+// the ESP32's 3.3V GPIOs).
+#define PIN_LCD_SDA      21   // ESP32 DevKit V1 default I2C SDA
+#define PIN_LCD_SCL      22   // ESP32 DevKit V1 default I2C SCL
+
+// PCF8574T backpacks ship at 0x27 by default; PCF8574AT variants (or some
+// clones) answer at 0x3F instead. If the display stays blank/garbled after
+// wiring is confirmed correct, run an I2C scanner sketch to find the actual
+// address rather than assuming a wiring fault.
+#define LCD_I2C_ADDR     0x27
+#define LCD_COLS         16
+#define LCD_ROWS         2
+
+// How long each of the three rotating screens (live T/RH, live NH3, model
+// prediction) stays up before swapping. Deliberately independent of
+// SAMPLE_INTERVAL_MS -- the display rotates on its own cadence regardless of
+// how often fresh data actually arrives.
+#define LCD_SCREEN_MS    3000

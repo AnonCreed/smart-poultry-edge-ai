@@ -193,7 +193,7 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
         {
             "status": "ok",
             "record": record.as_payload(),
-            "control": control.as_payload(record.predicted_class),
+            "control": control.as_payload(record.predicted_class, record.predicted_ammonia),
         },
         status=201,
     )
@@ -348,9 +348,13 @@ def actuator_control(request: HttpRequest) -> JsonResponse:
     control = ActuatorControl.current()
     latest = PoultryTelemetry.objects.order_by("-timestamp").first()
     latest_state = latest.predicted_class if latest else None
+    latest_predicted_ammonia = latest.predicted_ammonia if latest else None
 
     if request.method == "GET":
-        return JsonResponse({"status": "ok", "control": control.as_payload(latest_state)})
+        return JsonResponse({
+            "status": "ok",
+            "control": control.as_payload(latest_state, latest_predicted_ammonia),
+        })
 
     try:
         payload = json.loads(request.body.decode("utf-8"))
@@ -387,7 +391,10 @@ def actuator_control(request: HttpRequest) -> JsonResponse:
         control.heater_power_pct = value
 
     control.save()
-    return JsonResponse({"status": "ok", "control": control.as_payload(latest_state)})
+    return JsonResponse({
+        "status": "ok",
+        "control": control.as_payload(latest_state, latest_predicted_ammonia),
+    })
 
 
 def _parse_range_boundary(raw: str, *, end_of_day: bool):

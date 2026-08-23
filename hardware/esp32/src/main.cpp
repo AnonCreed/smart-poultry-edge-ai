@@ -16,6 +16,10 @@
 //      and apply them: fan (PWM speed) and PTC heater (active-LOW relay,
 //      ON/OFF only), closing the environmental control loop end-to-end
 //      across two boards.
+//   5. Drive a 16x2 I2C LCD (RG1602A-IIC(P), PCF8574T backpack, SDA=GPIO21/
+//      SCL=GPIO22) that rotates between live temp/humidity, live ammonia,
+//      and the master's predicted temp/ammonia (once its on-device model
+//      has warmed up) -- display only, no actuation depends on it.
 //
 // The main loop is non-blocking; all timing is millis()-based.
 // ============================================================================
@@ -26,6 +30,8 @@
 #include <time.h>
 #include <DHT.h>
 #include <math.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
 #include "config.h"
 
@@ -33,6 +39,7 @@
 // Peripheral objects
 // ----------------------------------------------------------------------------
 static DHT dht(PIN_DHT_DATA, DHT11);
+static LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 
 // Millis() timestamp of the last completed sample cycle. Deliberately
 // separate from FreeRTOS timers so the schedule survives temporary WiFi
@@ -70,6 +77,14 @@ struct ActuatorCommand {
     char state[24];
     uint8_t fan_pwm;
     uint8_t heater_pwm;  // NEW
+    uint8_t has_prediction;       // NEW: 1 once predicted_temperature/
+                                   // predicted_ammonia below are valid (the
+                                   // master's model has warmed up), 0 during
+                                   // its ~30-40s post-boot warm-up window.
+    float predicted_temperature;  // NEW: display-only, shown on the LCD's
+                                   // "Predicted" screen -- not used for
+                                   // actuation.
+    float predicted_ammonia;      // NEW: display-only, same as above.
 };
 
 static uint8_t masterMac[6] = MASTER_MAC_ADDR;
@@ -85,6 +100,24 @@ static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 // model's cyclic features stay in a plausible (not pathological) range.
 static uint8_t lastHour = 12;
 static uint8_t lastMonth = 6;
+
+// ----------------------------------------------------------------------------
+// LCD display state
+// ----------------------------------------------------------------------------
+// Latest values the LCD renders, kept separate from the ephemeral locals in
+// loop() so the display can redraw on its own rotation cadence without
+// waiting on a fresh sample or ESP-NOW command.
+static float g_lcdTemperature = 0.0f;
+static float g_lcdHumidity    = 0.0f;
+static float g_lcdAmmonia     = 0.0f;
+static bool  g_haveReading    = false;
+
+static float g_lcdPredTemperature = 0.0f;
+static float g_lcdPredAmmonia     = 0.0f;
+static bool  g_havePrediction     = false;
+
+static uint32_t nextLcdSwapAt = 0;
+static uint8_t  lcdScreen     = 0;  // 0=live T/RH, 1=live NH3, 2=predicted
 
 // ============================================================================
 // WiFi lifecycle
@@ -200,6 +233,70 @@ static float sampleMq137() {
         delayMicroseconds(200);  // ADC settling; shorter than any RTOS tick.
     }
     return mqCountsToPpm(sum, MQ_ADC_SAMPLES);
+}
+
+// ============================================================================
+// LCD display -- I2C 16x2, rotates between three screens
+// ============================================================================
+
+/**
+ * Print `text` on one LCD row, space-padded to LCD_COLS so a shorter string
+ * fully overwrites whatever longer string was there before -- the PCF8574T
+ * backpack has no clear-to-end-of-line primitive, so a naive lcd.print()
+ * would leave trailing characters from the previous screen behind.
+ */
+static void lcdPrintRow(uint8_t row, const char* text) {
+    char buf[LCD_COLS + 1];
+    snprintf(buf, sizeof(buf), "%-16s", text);
+    buf[LCD_COLS] = '\0';  // truncate defensively if text ran long
+    lcd.setCursor(0, row);
+    lcd.print(buf);
+}
+
+/** Render one of the three rotating screens (see lcdScreen's comment). */
+static void renderLcdScreen(uint8_t screen) {
+    char line0[LCD_COLS + 1];
+    char line1[LCD_COLS + 1];
+
+    switch (screen) {
+        case 0:
+            snprintf(line0, sizeof(line0), "Live Reading");
+            if (g_haveReading) {
+                snprintf(line1, sizeof(line1), "T:%.1fC H:%.0f%%", g_lcdTemperature, g_lcdHumidity);
+            } else {
+                snprintf(line1, sizeof(line1), "No data yet");
+            }
+            break;
+        case 1:
+            snprintf(line0, sizeof(line0), "Ammonia (NH3)");
+            if (g_haveReading) {
+                snprintf(line1, sizeof(line1), "%.1f ppm", g_lcdAmmonia);
+            } else {
+                snprintf(line1, sizeof(line1), "No data yet");
+            }
+            break;
+        default:  // case 2
+            snprintf(line0, sizeof(line0), "Predicted");
+            if (g_havePrediction) {
+                snprintf(line1, sizeof(line1), "T:%.1fC N:%.1f", g_lcdPredTemperature, g_lcdPredAmmonia);
+            } else {
+                snprintf(line1, sizeof(line1), "Warming up...");
+            }
+            break;
+    }
+
+    lcdPrintRow(0, line0);
+    lcdPrintRow(1, line1);
+}
+
+/** Non-blocking screen-rotation tick, called every loop() iteration. */
+static void updateLcd() {
+    const uint32_t now = millis();
+    if (static_cast<int32_t>(now - nextLcdSwapAt) < 0) return;
+    nextLcdSwapAt = now + LCD_SCREEN_MS;
+
+    renderLcdScreen(lcdScreen);
+    lcdScreen = (lcdScreen + 1) % 3;
 }
 
 // ============================================================================
@@ -331,15 +428,27 @@ void setup() {
     pinMode(PIN_HEATER_RELAY, OUTPUT);
     digitalWrite(PIN_HEATER_RELAY, HEATER_RELAY_OFF);
 
+    // LCD -- explicit Wire.begin(SDA, SCL) rather than relying on the
+    // board's default I2C pins, so this stays correct even on a DevKit
+    // variant whose defaults differ from GPIO21/22.
+    Wire.begin(PIN_LCD_SDA, PIN_LCD_SCL);
+    lcd.init();
+    lcd.backlight();
+    lcdPrintRow(0, "Poultry Telem.");
+    lcdPrintRow(1, "Booting...");
+
     connectWifi();
     syncNtpTime();
 
     if (!initEspNow()) {
         Serial.println("[BOOT] ESP-NOW bring-up failed; halting.");
+        lcdPrintRow(0, "ESP-NOW init");
+        lcdPrintRow(1, "FAILED");
         while (true) delay(1000);
     }
 
     nextSampleAt = millis();  // First tick fires immediately.
+    nextLcdSwapAt = millis();
 }
 
 void loop() {
@@ -357,7 +466,17 @@ void loop() {
         applyActuators(cmd.fan_pwm, cmd.heater_pwm);
         Serial.printf("[RX] Master classification: %s  fan_pwm=%u  heater_pwm=%u\n",
                       cmd.state, cmd.fan_pwm, cmd.heater_pwm);
+
+        g_havePrediction = (cmd.has_prediction != 0);
+        if (g_havePrediction) {
+            g_lcdPredTemperature = cmd.predicted_temperature;
+            g_lcdPredAmmonia = cmd.predicted_ammonia;
+        }
     }
+
+    // LCD rotation runs on its own cadence, independent of the sample tick
+    // below -- so it must not sit behind that tick's early returns.
+    updateLcd();
 
     const uint32_t now = millis();
     if (static_cast<int32_t>(now - nextSampleAt) < 0) {
@@ -371,6 +490,11 @@ void loop() {
         return;  // Skip tick on invalid DHT read; next tick retries.
     }
     const float ammoniaPpm = sampleMq137();
+
+    g_lcdTemperature = temperatureC;
+    g_lcdHumidity = humidityPct;
+    g_lcdAmmonia = ammoniaPpm;
+    g_haveReading = true;
 
     // -- Transmit over ESP-NOW -------------------------------------------------
     if (sendSample(temperatureC, humidityPct, ammoniaPpm)) {
