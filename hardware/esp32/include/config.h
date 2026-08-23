@@ -50,6 +50,14 @@
 #define WIFI_RETRY_MS      2000
 #define WIFI_MAX_RETRIES   10
 
+// BENCHMARK_MODE only (see platformio.ini's esp32dev_benchmark environment
+// and sampleBenchmark() in main.cpp). How many samples each synthetic
+// scenario holds/ramps its target values over before advancing to the next
+// -- 24 samples * SAMPLE_INTERVAL_MS(5s) = 2 minutes per scenario, generous
+// enough to clear the master's ~9-sample (~45s) model warm-up window and
+// still collect several predictions once warmed up.
+#define BENCHMARK_SAMPLES_PER_SCENARIO 24
+
 // ---------------------------------------------------------------------------
 // Pin map (mirrors schematic; do not divorce)
 // ---------------------------------------------------------------------------

@@ -21,6 +21,14 @@
 //      ammonia reading -- current data only, no forecast, no actuation
 //      depends on it.
 //
+// BENCHMARK_MODE (compile-time only, see the esp32dev_benchmark PlatformIO
+// environment in platformio.ini): replaces step 2's real DHT11/MQ-137 reads
+// with a scripted sequence of scenarios, for exercising the master's
+// predictive model + Django's classifier + the real actuator response
+// on-demand and repeatably. Everything else in the pipeline (ESP-NOW, real
+// on-device inference, real classification, real actuation) stays genuine
+// -- only the sensor read itself is synthetic. See sampleBenchmark().
+//
 // The main loop is non-blocking; all timing is millis()-based.
 // ============================================================================
 
@@ -228,6 +236,87 @@ static float sampleMq137() {
     return mqCountsToPpm(sum, MQ_ADC_SAMPLES);
 }
 
+#ifdef BENCHMARK_MODE
+// ============================================================================
+// Benchmark mode -- synthetic sensor data (see the esp32dev_benchmark
+// PlatformIO environment in platformio.ini). Replaces sampleDht()/
+// sampleMq137() with a scripted sequence of scenarios so the master's
+// on-device predictive model, Django's classifier, and the actuator
+// response can be exercised on-demand and repeatably, without a physical
+// sensor attached or waiting on real environmental drift. Only the sensor
+// READ is synthetic -- everything downstream (ESP-NOW, real TFLite
+// inference on the master, real classification, real actuator relay) is
+// the genuine end-to-end pipeline.
+//
+// This is a *compile-time-only* mode: BENCHMARK_MODE is set via a
+// dedicated PlatformIO environment, never via a runtime toggle, so a board
+// can never accidentally start reporting fake data without an explicit
+// reflash -- and the boot banner/LCD both say so loudly if it is.
+// ============================================================================
+struct BenchmarkScenario {
+    const char* name;
+    float tempStart,  tempEnd;    // degC -- linearly interpolated across the scenario
+    float humidStart, humidEnd;   // %RH
+    float nh3Start,   nh3End;     // ppm
+};
+
+// A constant scenario (Start == End) held back-to-back with a different
+// constant next scenario produces a step transition between them for free.
+// A scenario with Start != End is a ramp within itself -- useful for
+// testing predictive lead-time (does predicted_ammonia rise before the
+// live reading actually crosses the classifier's threshold?).
+static const BenchmarkScenario BENCHMARK_SCENARIOS[] = {
+    // name                        tempStart tempEnd  humidStart humidEnd  nh3Start nh3End
+    {"OPTIMAL_BASELINE",           24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},   // warm-up baseline
+    {"AMMONIA_STEP_CRITICAL",      24.0f,    24.0f,   55.0f,     55.0f,    40.0f,   40.0f},   // instant jump past the 25ppm threshold
+    {"AMMONIA_STEP_RECOVER",       24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},   // instant drop back to baseline
+    {"AMMONIA_RAMP_TO_SPIKE",      24.0f,    24.0f,   55.0f,     55.0f,     3.0f,   30.0f},   // gradual rise through the threshold
+    {"AMMONIA_RAMP_RECOVER",       24.0f,    24.0f,   55.0f,     55.0f,    30.0f,    3.0f},   // gradual fall back down
+    {"AMMONIA_BOUNDARY_LOW",       24.0f,    24.0f,   55.0f,     55.0f,    24.9f,   24.9f},   // just under AMMONIA_CRITICAL_PPM
+    {"AMMONIA_BOUNDARY_HIGH",      24.0f,    24.0f,   55.0f,     55.0f,    25.1f,   25.1f},   // just over it
+    {"HEAT_STRESS_STEP",           38.0f,    38.0f,   80.0f,     80.0f,     3.0f,    3.0f},   // T + RH combined, both past threshold
+    {"HEAT_STRESS_RECOVER",        24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},
+    {"LOW_TEMP_STEP",              15.0f,    15.0f,   55.0f,     55.0f,     3.0f,    3.0f},   // heater reactivity
+    {"LOW_TEMP_RECOVER",           24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},
+};
+static const size_t BENCHMARK_SCENARIO_COUNT =
+    sizeof(BENCHMARK_SCENARIOS) / sizeof(BENCHMARK_SCENARIOS[0]);
+
+static size_t   benchmarkScenarioIdx      = 0;
+static uint32_t benchmarkSampleInScenario = 0;
+
+/**
+ * Produce the next synthetic reading: linearly interpolates within the
+ * current scenario across BENCHMARK_SAMPLES_PER_SCENARIO samples, then
+ * advances to the next scenario (wrapping around at the end of the list).
+ * Logs which scenario/sample is active on every call so live serial output
+ * can be correlated against the master's [MODEL]/[ACTUATE] lines and the
+ * dashboard's classification.
+ */
+static void sampleBenchmark(float& temperatureC, float& humidityPct, float& ammoniaPpm) {
+    const BenchmarkScenario& s = BENCHMARK_SCENARIOS[benchmarkScenarioIdx];
+    const float frac = (BENCHMARK_SAMPLES_PER_SCENARIO <= 1)
+        ? 1.0f
+        : (float)benchmarkSampleInScenario / (float)(BENCHMARK_SAMPLES_PER_SCENARIO - 1);
+
+    temperatureC = s.tempStart  + (s.tempEnd  - s.tempStart)  * frac;
+    humidityPct  = s.humidStart + (s.humidEnd - s.humidStart) * frac;
+    ammoniaPpm   = s.nh3Start   + (s.nh3End   - s.nh3Start)   * frac;
+
+    Serial.printf("[BENCHMARK] scenario=%s (%u/%u)  T=%.1fC RH=%.1f%% NH3=%.1fppm\n",
+                  s.name, (unsigned)(benchmarkSampleInScenario + 1),
+                  (unsigned)BENCHMARK_SAMPLES_PER_SCENARIO,
+                  temperatureC, humidityPct, ammoniaPpm);
+
+    if (++benchmarkSampleInScenario >= BENCHMARK_SAMPLES_PER_SCENARIO) {
+        benchmarkSampleInScenario = 0;
+        benchmarkScenarioIdx = (benchmarkScenarioIdx + 1) % BENCHMARK_SCENARIO_COUNT;
+        Serial.printf("[BENCHMARK] -- advancing to scenario '%s' --\n",
+                      BENCHMARK_SCENARIOS[benchmarkScenarioIdx].name);
+    }
+}
+#endif  // BENCHMARK_MODE
+
 // ============================================================================
 // LCD display -- I2C 16x2, static current-reading readout (no rotation, no
 // forecast -- this board's LCD shows only its own live sensor data).
@@ -378,6 +467,9 @@ void setup() {
     Serial.begin(115200);
     delay(50);
     Serial.println("\n[BOOT] Poultry Telemetry sensor node starting.");
+#ifdef BENCHMARK_MODE
+    Serial.println("[BOOT] *** BENCHMARK MODE -- synthetic scripted sensor data, NOT real readings ***");
+#endif
 
     // Sensors
     dht.begin();
@@ -407,8 +499,14 @@ void setup() {
     Wire.begin(PIN_LCD_SDA, PIN_LCD_SCL);
     lcd.init();
     lcd.backlight();
+#ifdef BENCHMARK_MODE
+    lcdPrintRow(0, "** BENCHMARK **");
+    lcdPrintRow(1, "Fake data!");
+    delay(1500);  // Long enough to actually read before it starts cycling.
+#else
     lcdPrintRow(0, "Poultry Telem.");
     lcdPrintRow(1, "Booting...");
+#endif
 
     connectWifi();
     syncNtpTime();
@@ -450,11 +548,15 @@ void loop() {
     nextSampleAt = now + SAMPLE_INTERVAL_MS;
 
     // -- Sample --------------------------------------------------------------
-    float temperatureC = 0.0f, humidityPct = 0.0f;
+    float temperatureC = 0.0f, humidityPct = 0.0f, ammoniaPpm = 0.0f;
+#ifdef BENCHMARK_MODE
+    sampleBenchmark(temperatureC, humidityPct, ammoniaPpm);
+#else
     if (!sampleDht(temperatureC, humidityPct)) {
         return;  // Skip tick on invalid DHT read; next tick retries.
     }
-    const float ammoniaPpm = sampleMq137();
+    ammoniaPpm = sampleMq137();
+#endif
 
     g_lcdTemperature = temperatureC;
     g_lcdHumidity = humidityPct;

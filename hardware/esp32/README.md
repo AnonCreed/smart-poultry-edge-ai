@@ -146,3 +146,50 @@ blank after wiring is confirmed correct, run an I2C scanner sketch to find
 the real address before assuming a wiring fault. Requires the
 `marcoschwartz/LiquidCrystal_I2C` library, pulled automatically via
 `platformio.ini`'s `lib_deps`.
+
+## Benchmark mode -- synthetic data for testing the predictive system
+
+`platformio.ini` defines a second environment, `esp32dev_benchmark`, that
+replaces this board's real DHT11/MQ-137 reads with a scripted sequence of
+scenarios instead -- for exercising the master's on-device predictive model,
+Django's classifier, and the real actuator response on-demand and
+repeatably, without needing a physical sensor attached or waiting on real
+environmental drift to test an edge case. Everything downstream of the
+sensor read is the genuine pipeline: real ESP-NOW, real TFLite inference on
+the master, real classification, real fan/heater relay -- only the sensor
+value itself is synthetic.
+
+```bash
+pio run -e esp32dev_benchmark -t upload    # flash the benchmark build
+pio device monitor                         # watch [BENCHMARK]/[TX] lines
+
+# ... test, watch the master's [MODEL]/[ACTUATE] lines and the dashboard ...
+
+pio run -e esp32dev -t upload              # flash back to real sensors
+```
+
+This is **compile-time only** (`BENCHMARK_MODE`, set via the dedicated
+environment's `build_flags`, never a runtime toggle) -- a board can't
+accidentally start reporting fake data without an explicit reflash, and both
+the boot banner and the LCD say "BENCHMARK MODE" loudly on startup as a
+physical reminder while it's active.
+
+The scenario list (`BENCHMARK_SCENARIOS` in `src/main.cpp`) cycles through,
+holding or ramping each for `BENCHMARK_SAMPLES_PER_SCENARIO` samples
+(`config.h`, default 24 * 5 s = 2 minutes -- long enough to clear the
+master's ~9-sample/~45 s model warm-up and still collect several
+predictions once warmed up) before advancing to the next, looping forever:
+
+| Scenario | Tests |
+|---|---|
+| `OPTIMAL_BASELINE` | Warm-up baseline; nothing should trip. |
+| `AMMONIA_STEP_CRITICAL` / `_RECOVER` | Instant step across the 25 ppm `CRITICAL_AMMONIA` threshold, both directions -- classification latency, actuator response speed. |
+| `AMMONIA_RAMP_TO_SPIKE` / `_RECOVER` | Gradual rise/fall through the threshold -- does `predicted_ammonia` (the forecast) lead the live reading, and does `predicted_spike_probability` rise before the classifier actually flips? |
+| `AMMONIA_BOUNDARY_LOW` / `_HIGH` | Held just under/over 25 ppm -- exact threshold correctness, no off-by-one. |
+| `HEAT_STRESS_STEP` / `_RECOVER` | T + RH combined past both thresholds at once (the classifier's conjunction rule) and back. |
+| `LOW_TEMP_STEP` / `_RECOVER` | Below 18°C and back -- heater relay reactivity. |
+
+Add, remove, or edit entries in `BENCHMARK_SCENARIOS` for other cases (a
+different profile's thresholds, a slower/faster ramp, a longer soak at one
+value) -- each row is just a name plus a start/end value per channel, so a
+constant scenario is a step and a `Start != End` scenario is a ramp.
