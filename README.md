@@ -53,7 +53,7 @@ they can talk to each other.
 
 ## Classifier rules (first match wins)
 
-1. `ammonia_level > 25.0` -> `CRITICAL_AMMONIA` (dark red background, white text)
+1. `ammonia_level > 15.0` -> `CRITICAL_AMMONIA` (dark red background, white text)
 2. `temperature > 35.0 AND humidity > 70.0` -> `HEAT_STRESS_WARNING` (orange border, orange text)
 3. `temperature < 18.0` -> `LOW_TEMP_ALERT` (deep blue text, light blue accents)
 4. otherwise -> `OPTIMAL_ENVIRONMENT` (charcoal grid, solid green indicator dot)

@@ -276,12 +276,12 @@ struct BenchmarkScenario {
 static const BenchmarkScenario BENCHMARK_SCENARIOS[] = {
     // name                        tempStart tempEnd  humidStart humidEnd  nh3Start nh3End
     {"OPTIMAL_BASELINE",           24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},   // warm-up baseline
-    {"AMMONIA_STEP_CRITICAL",      24.0f,    24.0f,   55.0f,     55.0f,    40.0f,   40.0f},   // instant jump past the 25ppm threshold
+    {"AMMONIA_STEP_CRITICAL",      24.0f,    24.0f,   55.0f,     55.0f,    40.0f,   40.0f},   // instant jump past the 15ppm threshold
     {"AMMONIA_STEP_RECOVER",       24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},   // instant drop back to baseline
     {"AMMONIA_RAMP_TO_SPIKE",      24.0f,    24.0f,   55.0f,     55.0f,     3.0f,   30.0f},   // gradual rise through the threshold
     {"AMMONIA_RAMP_RECOVER",       24.0f,    24.0f,   55.0f,     55.0f,    30.0f,    3.0f},   // gradual fall back down
-    {"AMMONIA_BOUNDARY_LOW",       24.0f,    24.0f,   55.0f,     55.0f,    24.9f,   24.9f},   // just under AMMONIA_CRITICAL_PPM
-    {"AMMONIA_BOUNDARY_HIGH",      24.0f,    24.0f,   55.0f,     55.0f,    25.1f,   25.1f},   // just over it
+    {"AMMONIA_BOUNDARY_LOW",       24.0f,    24.0f,   55.0f,     55.0f,    14.9f,   14.9f},   // just under AMMONIA_CRITICAL_PPM
+    {"AMMONIA_BOUNDARY_HIGH",      24.0f,    24.0f,   55.0f,     55.0f,    15.1f,   15.1f},   // just over it
     {"HEAT_STRESS_STEP",           38.0f,    38.0f,   80.0f,     80.0f,     3.0f,    3.0f},   // T + RH combined, both past threshold
     {"HEAT_STRESS_RECOVER",        24.0f,    24.0f,   55.0f,     55.0f,     3.0f,    3.0f},
     {"LOW_TEMP_STEP",              15.0f,    15.0f,   55.0f,     55.0f,     3.0f,    3.0f},   // heater reactivity

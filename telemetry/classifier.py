@@ -6,9 +6,12 @@ without HTTP or ORM machinery, and so future ML-backed classifiers can be
 swapped in behind the same signature.
 
 Rule precedence (first match wins):
-1. NH3 toxicity dominates every other condition: ammonia > 25.0 PPM is an
+1. NH3 toxicity dominates every other condition: ammonia > 15.0 PPM is an
    immediate CRITICAL_AMMONIA regardless of thermal state, because ammonia
-   exposure damage is faster-acting than thermal stress.
+   exposure damage is faster-acting than thermal stress. 15.0 ppm is also
+   where Table 4-1's risk scale (AMMONIA_RISK_LEVELS below) starts labeling
+   readings "High risk" -- the reactive cutoff and that display band now
+   start at the same value, deliberately.
 2. Combined heat + humidity load (T > 35.0 AND RH > 70.0) yields
    HEAT_STRESS_WARNING; high humidity suppresses evaporative cooling, so
    the two conditions are only dangerous in conjunction.
@@ -20,7 +23,7 @@ from .models import EnvironmentalState
 
 # Threshold constants exposed at module level so the API layer can echo the
 # active thresholds to the front end without duplicating magic numbers.
-AMMONIA_CRITICAL_PPM = 25.0
+AMMONIA_CRITICAL_PPM = 15.0
 HEAT_STRESS_TEMP_C = 35.0
 HEAT_STRESS_HUMIDITY_PCT = 70.0
 LOW_TEMP_C = 18.0

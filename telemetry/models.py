@@ -156,7 +156,7 @@ class FlockProfile(models.Model):
     )
     custom_ammonia_critical_ppm = models.FloatField(
         null=True, blank=True,
-        help_text="Custom ammonia critical threshold in PPM, overriding the classifier's 25.0 ppm default.",
+        help_text="Custom ammonia critical threshold in PPM, overriding the classifier's 15.0 ppm default.",
     )
     updated_at = models.DateTimeField(auto_now=True)
 
