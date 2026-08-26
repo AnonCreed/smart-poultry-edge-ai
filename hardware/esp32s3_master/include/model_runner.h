@@ -1,13 +1,24 @@
 // ============================================================================
 // model_runner.h -- On-device TFLite Micro inference for the master node.
 //
-// Owns the rolling raw/feature history and the interpreter. The only files
-// tied to a specific trained model are model_data.h (weights) and
-// scaler_params.h (normalization + spike threshold) -- to deploy a
-// retrained model, regenerate those two files from the training pipeline
-// and rebuild; nothing in this header or model_runner.cpp needs to change
-// as long as the new model keeps the same input feature layout and output
-// tensor shapes (see buildFeatureRowFromHistory() in model_runner.cpp).
+// Retrained model (2026-08-26): flat 44-feature input (no more windowed 2D
+// tensor -- the "sliding window" lives entirely in the feature engineering
+// below, not in the tensor shape), two 2-element output heads: next_values
+// (regression: next temperature + log-ammonia) and spike_flags
+// (classification: ammonia-spike + temperature-spike probabilities).
+//
+// Owns the rolling raw-sample-to-bucket accumulator, the finalized-bucket
+// history, and the interpreter. To deploy a further retrain: regenerate
+// model_data.h and scaler_params.h from the training pipeline's
+// export_meta.pkl + model_esp32.tflite (see
+// hardware/esp32s3_master/README.md's "Swapping in a retrained model"
+// section for the exact steps, including the output-tensor-order
+// verification this file's readPrediction() depends on) -- nothing in this
+// header or model_runner.cpp needs to change as long as the new model
+// keeps the same 44-feature layout and the same two 2-element output heads.
+// If the training pipeline changes which features it derives (feature_cols
+// in the training script), buildFeatureRow() in model_runner.cpp needs
+// matching edits.
 // ============================================================================
 #pragma once
 
@@ -18,15 +29,19 @@ struct RawSample {
     float   temperature;
     float   humidity;
     float   ammonia_ppm;
-    uint8_t hour;   // 0-23 local time
-    uint8_t month;  // 1-12
+    uint8_t hour;   // 0-23 local time (NTP-synced on the sensor side)
+    uint8_t month;  // 1-12 -- unused by this model (kept only for wire
+                     // compatibility with SensorPacket; the training
+                     // pipeline never derives a month-cyclic feature).
 };
 
 struct ModelPrediction {
-    float temperature_next;
-    float ammonia_next;
-    float spike_probability;
-    bool  spike_predicted;
+    float temperature_next;             // deg C, ~10 min ahead
+    float ammonia_next;                 // ppm, ~10 min ahead
+    float ammonia_spike_probability;    // 0-1, sigmoid output
+    bool  ammonia_spike_predicted;      // >= kAmmoniaSpikeThreshold
+    float temp_spike_probability;       // 0-1, sigmoid output
+    bool  temp_spike_predicted;         // >= kTempSpikeThreshold
 };
 
 namespace model_runner {
@@ -37,11 +52,22 @@ namespace model_runner {
 // board has nothing useful to forecast without it.
 bool init();
 
-// Feeds one new raw sample into the rolling 3-sample history and 6-row
-// feature window, then runs inference once the window is full. Returns
-// false (leaving `out` untouched) while still warming up after boot --
-// expect ~9 samples (~45s at the sensor node's 5s cadence) before the
-// first true return.
-bool predict(const RawSample& sample, ModelPrediction& out);
+// Feeds one new raw sample (arrives ~every 5s from the sensor node) into a
+// rolling 10-minute accumulation bucket. The model was trained on data
+// resampled to a fixed 10-minute interval -- see the training pipeline and
+// hardware/esp32s3_master/README.md -- so raw 5s-spaced samples are
+// averaged into 10-minute buckets internally before any lag/rolling
+// feature is computed; feeding 5s-spaced values straight into "lag1" would
+// silently redefine it from "10 minutes ago" to "5 seconds ago" and make
+// every learned weight meaningless. `flockAgeWeeks` is the current flock
+// age (synced from Django's FlockProfile via the independent control poll
+// in main.cpp -- pass 1 if not yet known), clipped internally to [1, 5] to
+// match the training pipeline's `week` feature.
+//
+// Returns false (leaving `out` untouched) on almost every call -- a fresh
+// prediction is only produced once each ~10-minute bucket finalizes, and
+// only once 7 buckets (~70 minutes after boot) have accumulated (lag6
+// reaches 60 minutes back, plus the current bucket itself).
+bool predict(const RawSample& sample, uint8_t flockAgeWeeks, ModelPrediction& out);
 
 }  // namespace model_runner

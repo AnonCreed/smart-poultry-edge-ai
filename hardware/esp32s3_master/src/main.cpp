@@ -59,6 +59,14 @@ static char g_lastState[24] = "OPTIMAL_ENVIRONMENT";
 static ModelPrediction g_lastPrediction;
 static bool            g_havePrediction = false;
 
+// Flock age in weeks, synced from Django's FlockProfile via the independent
+// CONTROL_PATH poll below (see fetchManualControl()'s age_weeks parsing) --
+// the retrained on-device model takes flock age as a feature ("week" in
+// feature_cols), so the master needs it locally even though inference runs
+// before this sample is ever POSTed to Django. Defaults to 1 (youngest
+// band) until the first successful poll after boot.
+static uint8_t g_flockAgeWeeks = 1;
+
 // Forward declarations -- ensureWifi() (below) needs to re-run ESP-NOW
 // bring-up after a reconnect, but initEspNow()/registerSensorPeer() are
 // defined further down alongside the rest of the ESP-NOW callbacks.
@@ -282,7 +290,14 @@ static bool postToDjango(const SensorPacket& pkt, const ModelPrediction* pred, c
     if (pred != nullptr) {
         doc["predicted_temperature"]      = pred->temperature_next;
         doc["predicted_ammonia"]          = pred->ammonia_next;
-        doc["predicted_spike_probability"] = pred->spike_probability;
+        // Django's predicted_spike_probability field predates the retrained
+        // model's second (temperature-spike) classifier head -- kept wired
+        // to the ammonia one only, matching prior behavior exactly.
+        // pred->temp_spike_probability/temp_spike_predicted are real,
+        // computed values (see the [MODEL] Serial log in loop()) but not
+        // yet threaded through to Django/the dashboard; doing so needs a
+        // new persisted field and UI, deliberately out of scope here.
+        doc["predicted_spike_probability"] = pred->ammonia_spike_probability;
     } else {
         doc["predicted_temperature"]      = nullptr;
         doc["predicted_ammonia"]          = nullptr;
@@ -379,6 +394,15 @@ static void sendActuatorCommand(const char* state, uint8_t fanPwm, uint8_t heate
  * path that fixes that: called on its own timer from loop(), regardless of
  * g_newPacket.
  *
+ * Also opportunistically updates g_flockAgeWeeks from the same response's
+ * top-level `age_weeks` field (added to Django's control endpoint alongside
+ * this project's other flock-profile plumbing) -- unconditionally, whether
+ * mode is MANUAL or AUTO, since the on-device model needs flock age as a
+ * feature regardless of actuator mode. Left at its previous cached value
+ * (default 1) if the field is missing or the poll fails, rather than
+ * resetting -- a transient miss shouldn't suddenly change what "week" the
+ * model thinks it's predicting for.
+ *
  * Returns true and fills outFanPwm/outHeaterPwm only when mode is MANUAL and
  * the request succeeded; false otherwise (AUTO, unreachable, or unparsable --
  * callers should send nothing in that case, since the packet-driven AUTO
@@ -404,6 +428,11 @@ static bool fetchManualControl(uint8_t& outFanPwm, uint8_t& outHeaterPwm) {
     const DeserializationError err = deserializeJson(resp, http.getStream());
     http.end();
     if (err) return false;
+
+    if (resp["age_weeks"].is<int>()) {
+        int ageWeeks = resp["age_weeks"];
+        g_flockAgeWeeks = (uint8_t)constrain(ageWeeks, 1, 255);
+    }
 
     const char* mode = resp["control"]["mode"] | "AUTO";
     if (strcmp(mode, "MANUAL") != 0) return false;
@@ -506,19 +535,23 @@ void loop() {
                   pkt.seq, pkt.temperature, pkt.humidity,
                   pkt.ammonia_ppm, pkt.hour, pkt.month);
 
-    // Run on-device inference (returns false while the rolling window is
-    // still warming up after boot -- expect ~9 samples/~45s).
+    // Run on-device inference. Each raw sample feeds a rolling 10-minute
+    // bucket internally (see model_runner.cpp) -- returns false almost every
+    // call, and only ever produces a fresh prediction once each ~10-minute
+    // bucket finalizes, needing 7 finalized buckets (~70 min after boot)
+    // before the first one.
     RawSample raw{pkt.temperature, pkt.humidity, pkt.ammonia_ppm, pkt.hour, pkt.month};
     ModelPrediction pred;
-    const bool havePrediction = model_runner::predict(raw, pred);
+    const bool havePrediction = model_runner::predict(raw, g_flockAgeWeeks, pred);
     if (havePrediction) {
-        Serial.printf("[MODEL] next T=%.2fC NH3=%.2fppm spike_prob=%.4f spike=%d\n",
+        Serial.printf("[MODEL] next T=%.2fC NH3=%.2fppm ammonia_spike_prob=%.4f(%d) temp_spike_prob=%.4f(%d)\n",
                       pred.temperature_next, pred.ammonia_next,
-                      pred.spike_probability, pred.spike_predicted);
+                      pred.ammonia_spike_probability, pred.ammonia_spike_predicted,
+                      pred.temp_spike_probability, pred.temp_spike_predicted);
         g_lastPrediction = pred;
         g_havePrediction = true;
     } else {
-        Serial.println("[MODEL] warming up -- not enough history yet.");
+        Serial.println("[MODEL] warming up -- not enough bucketed history yet (~70 min after boot).");
     }
 
     // Fan PWM duty (0-255) from predicted-NH3 error. 0 (fan off) while the
