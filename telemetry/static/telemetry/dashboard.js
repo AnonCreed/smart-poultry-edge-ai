@@ -85,8 +85,6 @@
     consoleFeed:  document.getElementById("console-feed"),
     consoleCount: document.getElementById("console-count"),
     consolePause: document.getElementById("console-pause"),
-    heatLimitValue:  document.getElementById("temp-heat-limit-value"),
-    ammoniaMaxValue: document.getElementById("ammonia-safety-max-value"),
     ammoniaRisk:      document.getElementById("ammonia-risk"),
     ammoniaRiskLabel: document.getElementById("ammonia-risk-label"),
     // Flock profile controls.
@@ -734,9 +732,6 @@
       if (Array.isArray(body.thresholds.age_temperature_bands)) {
         ageTemperatureBands = body.thresholds.age_temperature_bands;
       }
-      el.heatLimitValue.textContent = body.thresholds.heat_stress_temp_c.toFixed(1);
-      el.ammoniaMaxValue.textContent = body.thresholds.ammonia_critical_ppm.toFixed(1);
-
       // Only hydrate the profile form from the server on the first
       // successful poll -- afterwards the form is user-owned, and the 5s
       // poll must not overwrite an in-progress edit out from under them.
