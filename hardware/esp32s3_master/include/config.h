@@ -59,7 +59,7 @@
 // this board's actual WiFi.channel() ever differs, main.cpp logs a warning
 // at boot -- update both this constant and the sensor's, then reflash both,
 // if the router's channel ever changes.
-#define ESPNOW_WIFI_CHANNEL 1
+#define ESPNOW_WIFI_CHANNEL 11
 
 // Sensor silence watchdog: if no SensorPacket has arrived over ESP-NOW for
 // this long, re-run the same esp_now_deinit()/initEspNow() recovery

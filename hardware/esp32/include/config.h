@@ -23,17 +23,20 @@
 // this board guaranteed that by joining the same AP as the master and
 // letting the router assign the channel to both; without an AP join, the
 // channel has to be fixed at compile time instead:
-#define ESPNOW_WIFI_CHANNEL 1
+#define ESPNOW_WIFI_CHANNEL 11
 // ^ Must match whatever channel the ESP32-S3 master's WiFi actually lands
 // on -- check the master's boot log line "[WIFI] Connected. IP=... Channel=N
-// ...". Channel 1 is what this project's router has consistently assigned
-// on every boot observed so far, but routers with auto-channel-select can
-// change it (e.g. after a reboot or interference-driven reshuffle) -- if
-// ESP-NOW packets silently stop arriving at the master despite this board's
-// [TX] lines looking normal, check the master's actual channel first. The
-// master logs a boot-time warning if its own channel doesn't match this
-// value, but can't fix a mismatch itself -- update this constant and
-// reflash this board if it happens.
+// ...". Updated 2026-08-26 to 11 for the "samjhana777_2" network (this
+// router's 2.4GHz band -- the ESP32/ESP32-S3 radios can't join a 5GHz-only
+// SSID like this router's "samjhana777_5" at all, so make sure the master's
+// credentials.h points at the _2 network, not _5). Routers with
+// auto-channel-select can still change this later (e.g. after a reboot or
+// interference-driven reshuffle) -- if ESP-NOW packets silently stop
+// arriving at the master despite this board's [TX] lines looking normal,
+// check the master's actual channel first. The master logs a boot-time
+// warning if its own channel doesn't match this value, but can't fix a
+// mismatch itself -- update this constant and reflash this board if it
+// happens.
 
 // MAC address of the ESP32-S3 master node's WiFi station interface. Flash
 // esp32s3_master/ first and copy the "[BOOT] Master MAC (WiFi STA): XX:XX:XX:XX:XX:XX"
