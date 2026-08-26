@@ -1,20 +1,26 @@
 """
 reel.py -- builds the Test Cases tab's demo reel: a full, precomputed,
-deterministic sequence of "frames" covering every named scenario in
-scenarios.py, fed through the REAL classifier and REAL actuator duty
-logic plus a pure-Python reimplementation of the real trained model -- so
-playback on the dashboard shows genuinely computed behavior, not canned
-numbers, without waiting on real hardware or the model's real ~70-minute
-warm-up.
+deterministic sequence of "frames" covering every case in scenarios.py,
+fed through the REAL classifier and REAL actuator duty logic plus a
+pure-Python reimplementation of the real trained model -- so playback
+shows genuinely computed behavior, not canned numbers, without waiting on
+the model's real ~70-minute warm-up.
 
-Nothing here writes to the database. classify_environment() and
-ActuatorControl.auto_duty_for_state() are called as pure functions with
-scenario-supplied arguments, not the live ActuatorControl singleton row --
-the real PoultryTelemetry table and the real ActuatorControl row are
-never touched. FlockProfile.current() is read-only here (same call every
-other view already makes; it can lazily create the singleton with
-defaults on first-ever use, same as any other page load -- it never
+This module itself never writes to the database: classify_environment()
+and ActuatorControl.auto_duty_for_state() are called as pure functions
+with scenario-supplied arguments, not the live ActuatorControl singleton
+row -- the real PoultryTelemetry table and the real ActuatorControl row
+are never touched HERE. FlockProfile.current() is read-only here (same
+call every other view already makes; it can lazily create the singleton
+with defaults on first-ever use, same as any other page load -- it never
 persists anything scenario-specific).
+
+v3 note: the dashboard's JS now ALSO pushes each returned frame's
+actuator duty to the real ActuatorControl row via the existing
+/api/telemetry/control/ endpoint, so it actually drives the real
+fan/heater during playback -- but that side effect lives entirely in
+dashboard.js's renderTestCaseFrame(), not here. This function's job is
+still just "compute and return," same as before.
 """
 import math
 
@@ -23,7 +29,7 @@ from django.utils import timezone
 from .. import classifier
 from ..models import ActuatorControl, FlockProfile
 from . import forecast_model
-from .scenarios import FRAMES_PER_SCENARIO, SCENARIOS
+from .scenarios import SCENARIOS
 
 
 def _lerp(start: float, end: float, frac: float) -> float:
@@ -44,7 +50,7 @@ def _make_bucket(temperature: float, humidity: float, ammonia_ppm: float,
 
 def build_demo_reel() -> dict:
     """{"frames": [...], "thresholds": {...}} -- the full flat list of
-    frames across all 13 scenarios in order, plus the exact thresholds
+    frames across all cases in scenarios.py, in order, plus the exact thresholds
     they were classified against (the active flock profile's, which may
     differ from classifier.py's bare module defaults if a custom
     override is set) so the frontend's chart reference lines never need
@@ -64,7 +70,7 @@ def build_demo_reel() -> dict:
     frames: list[dict] = []
 
     for scenario_index, scenario in enumerate(SCENARIOS):
-        n = FRAMES_PER_SCENARIO
+        n = scenario.frames
         # Pre-seed all 7 buckets at the scenario's starting condition, as
         # if it had already been steady for the past 60+ minutes -- this
         # is what makes frame 0 have a complete lag history immediately,

@@ -27,8 +27,10 @@
   const API_REPORT = "/api/telemetry/report/";
   const API_EXPORT = "/api/telemetry/export/";
   const API_TEST_CASE_REEL = "/api/telemetry/test-case-reel/";
-  const TEST_CASE_FRAME_MS = 500;   // Playback speed -- not the real 5s sensor cadence,
-                                     // this is a scripted demo reel, deliberately faster.
+  const TEST_CASE_FRAME_MS = 6000;  // Each case HOLDS this long -- comfortably longer than
+                                     // CONTROL_POLL_MS (3s, esp32s3_master/config.h) so the
+                                     // master's poll is guaranteed to pick up and relay every
+                                     // frame to the real fan/heater before it's replaced.
 
   // Chart scroll state: all historical points kept in memory, only a window
   // slice rendered to Chart.js so the canvas stays readable regardless of
@@ -723,10 +725,15 @@
      Scripted demo reel: fetch the whole precomputed sequence once on Start,
      then play it back client-side on its own timer -- separate Chart.js
      instances from Overview's (own canvases, own data arrays), so nothing
-     here ever touches allChartPoints/renderCharts()/refresh(). Purely a
-     what-if simulation: the reel itself never touched PoultryTelemetry or
-     the live ActuatorControl row server-side either (see telemetry/ml/
-     reel.py's module docstring). */
+     here ever touches allChartPoints/renderCharts()/refresh(). The reel
+     itself is still pure computation server-side (see telemetry/ml/
+     reel.py's module docstring) -- but each frame IS now pushed to the
+     REAL ActuatorControl row via the same API_CONTROL endpoint the
+     Overview tab's MANUAL controls use, so the real fan/heater actually
+     react during playback. Stop (and the reel ending naturally) reverts
+     to AUTO so the real system doesn't stay pinned at the last case's
+     duty. Running this at the same time as the Overview tab's own
+     actuator controls will conflict -- same shared row. */
 
   let testCaseChartTemp = null;
   let testCaseChartAmmonia = null;
@@ -759,8 +766,45 @@
     }
   }
 
+  /**
+   * Push one duty to the REAL ActuatorControl row (MANUAL mode) -- the
+   * master board's existing CONTROL_POLL_MS poll picks this up and
+   * relays it to the real sensor's real GPIO/PWM, same mechanism the
+   * Overview tab's manual fan/heater sliders already use. Fire-and-forget
+   * from the playback timer (not awaited by the caller) -- a dropped
+   * frame's POST just means that one case's duty arrives a beat late,
+   * not a broken demo; errors are logged, not surfaced mid-playback.
+   */
+  async function pushActuatorDuty(fanPct, heaterPct) {
+    try {
+      await fetch(API_CONTROL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "MANUAL", fan_speed_pct: fanPct, heater_power_pct: heaterPct }),
+      });
+    } catch (err) {
+      console.error("Test case actuator push failed:", err);
+    }
+  }
+
+  /** Hand the real system back to AUTO -- called on Stop and on natural
+   * reel end, so the real fan/heater don't stay pinned at the last
+   * case's duty once the demo is over. */
+  async function revertToAuto() {
+    try {
+      await fetch(API_CONTROL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "AUTO" }),
+      });
+    } catch (err) {
+      console.error("Test case AUTO revert failed:", err);
+    }
+  }
+
   function renderTestCaseFrame(frame) {
     const label = `${frame.scenario_label} #${frame.frame_index + 1}`;
+    pushActuatorDuty(frame.actuator.fan_pct, frame.actuator.heater_pct);
 
     testCaseChartTemp.data.labels.push(label);
     testCaseChartTemp.data.datasets[0].data.push(frame.reading.temperature);
@@ -802,6 +846,7 @@
     el.testCaseStart.disabled = false;
     el.testCaseStop.disabled = true;
     if (finalMessage) el.testCaseProgress.textContent = finalMessage;
+    revertToAuto();  // Real hardware goes back to normal AUTO operation.
   }
 
   function playNextTestCaseFrame() {

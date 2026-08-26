@@ -436,14 +436,12 @@
       </div>
 
       <!-- ========================= TEST CASES VIEW =========================
-           Scripted demo reel -- plays a fixed sequence of named scenarios
-           (mirrors hardware/esp32/src/main.cpp's BENCHMARK_SCENARIOS) through
-           the REAL classifier and REAL actuator duty logic plus a pure-Python
-           reimplementation of the on-device forecast model, so what plays
-           back is genuinely computed, not canned. Purely a what-if
-           simulation: never touches PoultryTelemetry or the live actuator
-           mode/duty. Independent of the 5 s poll loop -- fetches the whole
-           reel once on Start, then animates through it client-side. -->
+           Scripted demo reel through the REAL classifier/actuator logic
+           and a pure-Python copy of the real forecast model -- drives the
+           REAL ActuatorControl row (MANUAL mode) during playback, so the
+           real fan/heater actually respond; reverts to AUTO on Stop/end.
+           Independent of the 5 s poll loop -- fetches the reel once on
+           Start, then animates through it client-side. -->
       <div class="tab-pane fade" id="view-test-cases" role="tabpanel" aria-labelledby="tab-test-cases">
         <div class="card mb-3">
           <div class="card-body">
@@ -451,11 +449,7 @@
               <div>
                 <h2 class="h6 mb-1">Test case showcase</h2>
                 <p class="text-muted small mb-0">
-                  Plays a scripted sequence of named scenarios (ammonia spikes, heat stress,
-                  cold, combinations) through the real classifier and actuator logic, with a
-                  full simulated lag history already filled in -- no 70-minute warm-up wait.
-                  <strong>Simulation only -- does not affect live actuator mode/duty or get
-                  saved as telemetry.</strong>
+                  <strong>Drives the real fan/heater</strong> through 6 scripted cases. Reverts to AUTO on Stop.
                 </p>
               </div>
               <div class="d-flex align-items-center gap-2">
