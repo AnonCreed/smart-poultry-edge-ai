@@ -64,6 +64,12 @@
           Reports
         </button>
       </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-test-cases" data-bs-toggle="tab" data-bs-target="#view-test-cases"
+                type="button" role="tab" aria-controls="view-test-cases" aria-selected="false">
+          Test Cases
+        </button>
+      </li>
     </ul>
 
     <div class="tab-content">
@@ -318,7 +324,7 @@
                   <div class="d-flex gap-3 small text-muted">
                     <span><span class="swatch swatch-nh3-live"></span>Live sensor</span>
                     <span><span class="swatch swatch-dashed swatch-nh3-pred"></span>Edge-AI forecast</span>
-                    <span><span class="swatch swatch-dashed swatch-threshold"></span>25.0 ppm safety max</span>
+                    <span><span class="swatch swatch-dashed swatch-threshold"></span>15.0 ppm safety max</span>
                   </div>
                 </div>
                 <div class="chart-wrap chart-wrap-tall"><canvas id="chart-ammonia"></canvas></div>
@@ -424,6 +430,106 @@
                 </thead>
                 <tbody id="report-state-body"></tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========================= TEST CASES VIEW =========================
+           Scripted demo reel -- plays a fixed sequence of named scenarios
+           (mirrors hardware/esp32/src/main.cpp's BENCHMARK_SCENARIOS) through
+           the REAL classifier and REAL actuator duty logic plus a pure-Python
+           reimplementation of the on-device forecast model, so what plays
+           back is genuinely computed, not canned. Purely a what-if
+           simulation: never touches PoultryTelemetry or the live actuator
+           mode/duty. Independent of the 5 s poll loop -- fetches the whole
+           reel once on Start, then animates through it client-side. -->
+      <div class="tab-pane fade" id="view-test-cases" role="tabpanel" aria-labelledby="tab-test-cases">
+        <div class="card mb-3">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
+              <div>
+                <h2 class="h6 mb-1">Test case showcase</h2>
+                <p class="text-muted small mb-0">
+                  Plays a scripted sequence of named scenarios (ammonia spikes, heat stress,
+                  cold, combinations) through the real classifier and actuator logic, with a
+                  full simulated lag history already filled in -- no 70-minute warm-up wait.
+                  <strong>Simulation only -- does not affect live actuator mode/duty or get
+                  saved as telemetry.</strong>
+                </p>
+              </div>
+              <div class="d-flex align-items-center gap-2">
+                <button id="test-case-start" type="button" class="btn btn-primary btn-sm">Start</button>
+                <button id="test-case-stop" type="button" class="btn btn-outline-secondary btn-sm" disabled>Stop</button>
+              </div>
+            </div>
+            <div class="small text-muted" id="test-case-progress">Not running.</div>
+          </div>
+        </div>
+
+        <div class="row g-3 mb-3" aria-label="Test case live readout">
+          <div class="col-lg-3 col-sm-6">
+            <div class="card h-100">
+              <div class="card-body">
+                <div class="small text-muted mb-1">Fed reading</div>
+                <div class="font-monospace" id="test-case-reading">--</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-sm-6">
+            <div class="card h-100">
+              <div class="card-body">
+                <div class="small text-muted mb-1">Classification</div>
+                <div class="fw-semibold" id="test-case-classification">--</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-sm-6">
+            <div class="card h-100">
+              <div class="card-body">
+                <div class="small text-muted mb-1">Edge-AI forecast</div>
+                <div class="font-monospace" id="test-case-forecast">--</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-sm-6">
+            <div class="card h-100">
+              <div class="card-body">
+                <div class="small text-muted mb-1">Actuator response</div>
+                <div class="font-monospace" id="test-case-actuator">Fan duty (PWM %): -- &middot; Heater: --</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row g-3">
+          <div class="col-lg-6">
+            <div class="card">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                  <h2 class="h6 mb-0">Temperature (fed)</h2>
+                  <div class="d-flex gap-3 small text-muted">
+                    <span><span class="swatch swatch-temp-live"></span>Fed reading</span>
+                    <span><span class="swatch swatch-dashed swatch-temp-pred"></span>Edge-AI forecast</span>
+                  </div>
+                </div>
+                <div class="chart-wrap chart-wrap-tall"><canvas id="test-case-chart-temperature"></canvas></div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-6">
+            <div class="card">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                  <h2 class="h6 mb-0">Ammonia (fed)</h2>
+                  <div class="d-flex gap-3 small text-muted">
+                    <span><span class="swatch swatch-nh3-live"></span>Fed reading</span>
+                    <span><span class="swatch swatch-dashed swatch-nh3-pred"></span>Edge-AI forecast</span>
+                    <span><span class="swatch swatch-dashed swatch-threshold"></span>15.0 ppm safety max</span>
+                  </div>
+                </div>
+                <div class="chart-wrap chart-wrap-tall"><canvas id="test-case-chart-ammonia"></canvas></div>
+              </div>
             </div>
           </div>
         </div>

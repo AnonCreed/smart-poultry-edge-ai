@@ -8,7 +8,8 @@ from django.test import TestCase
 from django.urls import reverse
 
 from .classifier import classify_environment
-from .models import ActuatorControl, EnvironmentalState, PoultryTelemetry
+from .ml.scenarios import FRAMES_PER_SCENARIO, SCENARIOS
+from .models import ActuatorControl, EnvironmentalState, FlockProfile, PoultryTelemetry
 
 
 class ClassifierRuleTests(TestCase):
@@ -427,3 +428,108 @@ class ExportAndReportEndpointTests(TestCase):
             reverse("telemetry-report"), {"start": "2026-08-05", "end": "2026-08-01"}
         )
         self.assertEqual(response.status_code, 400)
+
+
+class TestCaseReelEndpointTests(TestCase):
+    """
+    The Test Cases tab's demo reel -- see telemetry/ml/reel.py. These tests
+    exist specifically to prove the hard constraint this feature was built
+    under: it must be pure simulation, with zero effect on real telemetry
+    or the live actuator state, no matter how many scenarios are played.
+    """
+
+    def _frames(self):
+        response = self.client.get(reverse("telemetry-test-case-reel"))
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ok")
+        return body["frames"], body["thresholds"]
+
+    def test_never_touches_persisted_state(self):
+        ActuatorControl.objects.create(mode="MANUAL", fan_speed_pct=42, heater_power_pct=100)
+        telemetry_count_before = PoultryTelemetry.objects.count()
+
+        self._frames()
+
+        self.assertEqual(PoultryTelemetry.objects.count(), telemetry_count_before)
+        control = ActuatorControl.current()
+        self.assertEqual(control.mode, "MANUAL")
+        self.assertEqual(control.fan_speed_pct, 42)
+        self.assertEqual(control.heater_power_pct, 100)
+
+    def test_frame_count_and_scenario_order(self):
+        frames, _ = self._frames()
+        self.assertEqual(len(frames), len(SCENARIOS) * FRAMES_PER_SCENARIO)
+        seen_order = []
+        for frame in frames:
+            if frame["scenario_key"] not in seen_order:
+                seen_order.append(frame["scenario_key"])
+        self.assertEqual(seen_order, [s.key for s in SCENARIOS])
+
+    def test_frame_zero_has_full_history_no_warmup_placeholder(self):
+        # The whole point of the demo reel -- every scenario's very first
+        # frame already has a real forecast, not a "warming up" placeholder,
+        # because the bucket history is pre-seeded rather than accumulated
+        # in real time.
+        frames, _ = self._frames()
+        first_frames = [f for f in frames if f["frame_index"] == 0]
+        self.assertEqual(len(first_frames), len(SCENARIOS))
+        for frame in first_frames:
+            self.assertIsInstance(frame["forecast"]["predicted_temperature"], float)
+            self.assertIsInstance(frame["forecast"]["predicted_ammonia"], float)
+
+    def test_ammonia_step_critical_forces_fan_100(self):
+        frames, _ = self._frames()
+        frame = next(f for f in frames if f["scenario_key"] == "AMMONIA_STEP_CRITICAL" and f["frame_index"] == 0)
+        self.assertEqual(frame["classification"], EnvironmentalState.CRITICAL_AMMONIA)
+        self.assertEqual(frame["actuator"]["fan_pct"], 100)
+
+    def test_low_temp_step_forces_heater_on(self):
+        frames, _ = self._frames()
+        frame = next(f for f in frames if f["scenario_key"] == "LOW_TEMP_STEP" and f["frame_index"] == 0)
+        self.assertEqual(frame["classification"], EnvironmentalState.LOW_TEMP_ALERT)
+        self.assertEqual(frame["actuator"]["heater_pct"], 100)
+
+    def test_heat_stress_forces_heater_off(self):
+        frames, _ = self._frames()
+        frame = next(f for f in frames if f["scenario_key"] == "HEAT_STRESS_STEP" and f["frame_index"] == 0)
+        self.assertEqual(frame["classification"], EnvironmentalState.HEAT_STRESS_WARNING)
+        self.assertEqual(frame["actuator"]["fan_pct"], 100)
+        self.assertEqual(frame["actuator"]["heater_pct"], 0)
+
+    def test_cold_and_critical_ammonia_forces_both(self):
+        # The exact regression case the safety-floor fix (see models.py's
+        # ActuatorControl._apply_safety_floor()) targets -- both fan and
+        # heater at 100% simultaneously.
+        frames, _ = self._frames()
+        frame = next(f for f in frames if f["scenario_key"] == "COLD_AND_CRITICAL_AMMONIA" and f["frame_index"] == 0)
+        self.assertEqual(frame["classification"], EnvironmentalState.CRITICAL_AMMONIA)
+        self.assertEqual(frame["actuator"]["fan_pct"], 100)
+        self.assertEqual(frame["actuator"]["heater_pct"], 100)
+
+    def test_ammonia_boundary_straddles_threshold(self):
+        frames, thresholds = self._frames()
+        low = next(f for f in frames if f["scenario_key"] == "AMMONIA_BOUNDARY_LOW" and f["frame_index"] == 0)
+        high = next(f for f in frames if f["scenario_key"] == "AMMONIA_BOUNDARY_HIGH" and f["frame_index"] == 0)
+        self.assertEqual(low["classification"], EnvironmentalState.OPTIMAL_ENVIRONMENT)
+        self.assertEqual(high["classification"], EnvironmentalState.CRITICAL_AMMONIA)
+        self.assertEqual(thresholds["ammonia_critical_ppm"], 15.0)
+
+    def test_ramp_scenario_ammonia_increases_across_frames(self):
+        frames, _ = self._frames()
+        ramp = [f for f in frames if f["scenario_key"] == "AMMONIA_RAMP_TO_SPIKE"]
+        readings = [f["reading"]["ammonia_level"] for f in ramp]
+        self.assertEqual(readings, sorted(readings))
+        self.assertLess(readings[0], readings[-1])
+
+    def test_reel_reflects_custom_flock_profile_thresholds(self):
+        FlockProfile.objects.create(
+            age_weeks=2, is_configured=True, use_custom_thresholds=True,
+            custom_ammonia_critical_ppm=10.0,
+        )
+        frames, thresholds = self._frames()
+        self.assertEqual(thresholds["ammonia_critical_ppm"], 10.0)
+        # A reading of 10.1ppm (AMMONIA_BOUNDARY_LOW's 14.9 is now well
+        # past the lowered 10.0 threshold) should classify as critical.
+        frame = next(f for f in frames if f["scenario_key"] == "AMMONIA_BOUNDARY_LOW" and f["frame_index"] == 0)
+        self.assertEqual(frame["classification"], EnvironmentalState.CRITICAL_AMMONIA)

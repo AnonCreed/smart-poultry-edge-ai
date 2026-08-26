@@ -26,6 +26,9 @@
   const API_CONTROL = "/api/telemetry/control/";
   const API_REPORT = "/api/telemetry/report/";
   const API_EXPORT = "/api/telemetry/export/";
+  const API_TEST_CASE_REEL = "/api/telemetry/test-case-reel/";
+  const TEST_CASE_FRAME_MS = 500;   // Playback speed -- not the real 5s sensor cadence,
+                                     // this is a scripted demo reel, deliberately faster.
 
   // Chart scroll state: all historical points kept in memory, only a window
   // slice rendered to Chart.js so the canvas stays readable regardless of
@@ -120,6 +123,14 @@
     reportHumidity:  document.getElementById("report-humidity"),
     reportAmmonia:   document.getElementById("report-ammonia"),
     reportStateBody: document.getElementById("report-state-body"),
+    // Test Cases tab controls.
+    testCaseStart:          document.getElementById("test-case-start"),
+    testCaseStop:           document.getElementById("test-case-stop"),
+    testCaseProgress:       document.getElementById("test-case-progress"),
+    testCaseReading:        document.getElementById("test-case-reading"),
+    testCaseClassification: document.getElementById("test-case-classification"),
+    testCaseForecast:       document.getElementById("test-case-forecast"),
+    testCaseActuator:       document.getElementById("test-case-actuator"),
   };
 
   const STATE_META = {
@@ -232,7 +243,7 @@
     "chart-ammonia",
     "Live ammonia ppm", COLOR.nh3Live,
     "Forecast ammonia ppm", COLOR.nh3Pred,
-    "25.0 ppm safety max"
+    "15.0 ppm safety max"
   );
 
   /* ------------------------------ Renderers ------------------------------ */
@@ -706,6 +717,128 @@
   el.reportDownload.addEventListener("click", () => {
     const query = buildReportQuery();
     window.location.href = `${API_EXPORT}${query ? `?${query}` : ""}`;
+  });
+
+  /* ------------------------------ Test Cases ------------------------------
+     Scripted demo reel: fetch the whole precomputed sequence once on Start,
+     then play it back client-side on its own timer -- separate Chart.js
+     instances from Overview's (own canvases, own data arrays), so nothing
+     here ever touches allChartPoints/renderCharts()/refresh(). Purely a
+     what-if simulation: the reel itself never touched PoultryTelemetry or
+     the live ActuatorControl row server-side either (see telemetry/ml/
+     reel.py's module docstring). */
+
+  let testCaseChartTemp = null;
+  let testCaseChartAmmonia = null;
+  let testCaseFrames = [];
+  let testCaseThresholds = { heat_stress_temp_c: null, ammonia_critical_ppm: null };
+  let testCaseFrameIndex = 0;
+  let testCaseTimerId = null;
+
+  function ensureTestCaseCharts() {
+    if (testCaseChartTemp && testCaseChartAmmonia) return;
+    testCaseChartTemp = makeDualLineChart(
+      "test-case-chart-temperature",
+      "Fed temperature degC", COLOR.tempLive,
+      "Forecast temperature degC", COLOR.tempPred,
+      "Heat stress threshold"
+    );
+    testCaseChartAmmonia = makeDualLineChart(
+      "test-case-chart-ammonia",
+      "Fed ammonia ppm", COLOR.nh3Live,
+      "Forecast ammonia ppm", COLOR.nh3Pred,
+      "Ammonia safety max"
+    );
+  }
+
+  function resetTestCaseCharts() {
+    for (const chart of [testCaseChartTemp, testCaseChartAmmonia]) {
+      chart.data.labels = [];
+      for (const dataset of chart.data.datasets) dataset.data = [];
+      chart.update();
+    }
+  }
+
+  function renderTestCaseFrame(frame) {
+    const label = `${frame.scenario_label} #${frame.frame_index + 1}`;
+
+    testCaseChartTemp.data.labels.push(label);
+    testCaseChartTemp.data.datasets[0].data.push(frame.reading.temperature);
+    testCaseChartTemp.data.datasets[1].data.push(frame.forecast.predicted_temperature);
+    testCaseChartTemp.data.datasets[2].data.push(testCaseThresholds.heat_stress_temp_c);
+    testCaseChartTemp.update();
+
+    testCaseChartAmmonia.data.labels.push(label);
+    testCaseChartAmmonia.data.datasets[0].data.push(frame.reading.ammonia_level);
+    testCaseChartAmmonia.data.datasets[1].data.push(frame.forecast.predicted_ammonia);
+    testCaseChartAmmonia.data.datasets[2].data.push(testCaseThresholds.ammonia_critical_ppm);
+    testCaseChartAmmonia.update();
+
+    el.testCaseProgress.textContent =
+      `Scenario ${frame.scenario_index + 1} of ${frame.scenario_count}: ${frame.scenario_label} ` +
+      `— frame ${frame.frame_index + 1}/${frame.frames_in_scenario} — ${frame.scenario_description}`;
+
+    el.testCaseReading.textContent =
+      `T=${frame.reading.temperature.toFixed(1)}C  RH=${frame.reading.humidity.toFixed(1)}%  ` +
+      `NH3=${frame.reading.ammonia_level.toFixed(1)}ppm`;
+
+    const stateMeta = STATE_META[frame.classification];
+    el.testCaseClassification.textContent = stateMeta ? stateMeta.label : frame.classification;
+
+    el.testCaseForecast.textContent =
+      `T→${frame.forecast.predicted_temperature.toFixed(1)}C  NH3→${frame.forecast.predicted_ammonia.toFixed(1)}ppm  ` +
+      `spike(NH3)=${(frame.forecast.ammonia_spike_probability * 100).toFixed(0)}%  ` +
+      `spike(T)=${(frame.forecast.temp_spike_probability * 100).toFixed(0)}%`;
+
+    el.testCaseActuator.textContent =
+      `Fan duty (PWM %): ${frame.actuator.fan_pct}%  ·  Heater: ${frame.actuator.heater_pct > 0 ? "ON" : "OFF"}`;
+  }
+
+  function stopTestCases(finalMessage) {
+    if (testCaseTimerId !== null) {
+      clearInterval(testCaseTimerId);
+      testCaseTimerId = null;
+    }
+    el.testCaseStart.disabled = false;
+    el.testCaseStop.disabled = true;
+    if (finalMessage) el.testCaseProgress.textContent = finalMessage;
+  }
+
+  function playNextTestCaseFrame() {
+    if (testCaseFrameIndex >= testCaseFrames.length) {
+      stopTestCases("Demo reel finished. Click Start to play it again.");
+      return;
+    }
+    renderTestCaseFrame(testCaseFrames[testCaseFrameIndex]);
+    testCaseFrameIndex += 1;
+  }
+
+  el.testCaseStart.addEventListener("click", async () => {
+    el.testCaseStart.disabled = true;
+    el.testCaseProgress.textContent = "Loading demo reel...";
+    try {
+      const response = await fetch(API_TEST_CASE_REEL, { headers: { Accept: "application/json" } });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+
+      ensureTestCaseCharts();
+      resetTestCaseCharts();
+      testCaseFrames = body.frames;
+      testCaseThresholds = body.thresholds;
+      testCaseFrameIndex = 0;
+
+      el.testCaseStop.disabled = false;
+      playNextTestCaseFrame();  // First frame immediately, rest on the interval.
+      testCaseTimerId = setInterval(playNextTestCaseFrame, TEST_CASE_FRAME_MS);
+    } catch (err) {
+      el.testCaseStart.disabled = false;
+      el.testCaseProgress.textContent = `Error: ${err.message}`;
+      console.error("Test case reel fetch failed:", err);
+    }
+  });
+
+  el.testCaseStop.addEventListener("click", () => {
+    stopTestCases("Stopped.");
   });
 
   /* ------------------------------ Poll loop ------------------------------ */

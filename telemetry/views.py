@@ -26,6 +26,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from . import classifier
+from .ml import reel as test_case_reel_builder
 from .models import ActuatorControl, ActuatorMode, EnvironmentalState, FlockProfile, PoultryTelemetry
 
 # Dedicated ingestion logger. Server-side log lines mirror the front-end
@@ -563,6 +564,27 @@ def report_summary(request: HttpRequest) -> JsonResponse:
             state: state_counts_raw.get(state, 0) for state in EnvironmentalState.values
         },
     })
+
+
+@require_GET
+def test_case_reel(request: HttpRequest) -> JsonResponse:
+    """
+    GET -> the full Test Cases demo reel: a precomputed, deterministic
+    sequence of frames covering every named scenario in telemetry/ml/
+    scenarios.py, each one run through the REAL classify_environment()
+    and REAL ActuatorControl.auto_duty_for_state() plus a pure-Python
+    reimplementation of the on-device model (telemetry/ml/forecast_model.py
+    -- the real one only exists as TFLite Micro C++ on the ESP32-S3, this
+    is a from-scratch port of the same trained weights, verified to match
+    within 1e-6, see telemetry/ml/export_weights.py).
+
+    Purely a read/compute endpoint: no PoultryTelemetry record is ever
+    created, and the real ActuatorControl singleton row is never read via
+    .current() or written via .save() -- see telemetry/ml/reel.py's module
+    docstring. Intended for the dashboard's Test Cases tab to fetch once
+    and then animate through client-side; not polled.
+    """
+    return JsonResponse({"status": "ok", **test_case_reel_builder.build_demo_reel()})
 
 
 def dashboard(request: HttpRequest):

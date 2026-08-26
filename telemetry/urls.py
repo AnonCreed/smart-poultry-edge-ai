@@ -7,6 +7,7 @@ Telemetry app URL map.
 /api/telemetry/control/     GET/POST   fan/heater actuator mode + manual duty
 /api/telemetry/export/      GET        CSV export over an hours or start/end window
 /api/telemetry/report/      GET        aggregate summary over the same window
+/api/telemetry/test-case-reel/  GET    precomputed scenario demo reel for the Test Cases tab
 /                           GET        analytical dashboard shell
 """
 from django.urls import path
@@ -20,5 +21,6 @@ urlpatterns = [
     path("api/telemetry/control/", views.actuator_control, name="telemetry-control"),
     path("api/telemetry/export/", views.export_telemetry, name="telemetry-export"),
     path("api/telemetry/report/", views.report_summary, name="telemetry-report"),
+    path("api/telemetry/test-case-reel/", views.test_case_reel, name="telemetry-test-case-reel"),
     path("", views.dashboard, name="telemetry-dashboard"),
 ]
