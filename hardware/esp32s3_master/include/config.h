@@ -32,8 +32,12 @@
 #define DISCOVERY_MAX_ATTEMPTS   8      // ~12 s worst case at boot
 
 // ---------------------------------------------------------------------------
-// NTP (for logging timestamps only -- model features come from the sensor node)
+// NTP
 // ---------------------------------------------------------------------------
+// The sensor node has no WiFi/NTP of its own anymore (see esp32/include/
+// config.h's "Radio" section) -- this board is now the sole source of
+// wall-clock time for BOTH its own logging AND the model's hour-of-day
+// cyclic feature (currentHour() in main.cpp), not logging alone.
 #define NTP_SERVER          "pool.ntp.org"
 #define GMT_OFFSET_SEC       20700   // Nepal Standard Time (UTC+5:45)
 #define DAYLIGHT_OFFSET_SEC  0
@@ -46,17 +50,40 @@
 #define WIFI_MAX_RETRIES 10
 #define HTTP_TIMEOUT_MS  4000
 
+// Expected WiFi channel, purely for a boot-time sanity check/log warning --
+// this board still joins its AP normally (connectWifi() in main.cpp) and
+// uses whatever channel the router actually assigns; it does NOT force its
+// own radio onto this value. Must match ESPNOW_WIFI_CHANNEL in esp32/
+// include/config.h, since the sensor node hardcodes its channel (no AP to
+// negotiate one from) and ESP-NOW only works when both radios agree. If
+// this board's actual WiFi.channel() ever differs, main.cpp logs a warning
+// at boot -- update both this constant and the sensor's, then reflash both,
+// if the router's channel ever changes.
+#define ESPNOW_WIFI_CHANNEL 1
+
+// Sensor silence watchdog: if no SensorPacket has arrived over ESP-NOW for
+// this long, re-run the same esp_now_deinit()/initEspNow() recovery
+// sequence already used on a WiFi reconnect (see ensureWifi() in main.cpp)
+// as a cheap self-heal for a stuck ESP-NOW stack that didn't involve a
+// WiFi drop. 3x the sensor's SAMPLE_INTERVAL_MS (esp32/include/config.h,
+// currently 5000ms) -- the two aren't wire-checked against each other, so
+// keep them in sync by hand if either changes.
+#define SENSOR_SILENCE_TIMEOUT_MS (3UL * 5000UL)
+
 // ---------------------------------------------------------------------------
 // Wire contract -- must remain byte-identical with esp32/src/main.cpp
 // ---------------------------------------------------------------------------
 // SensorPacket is sent by the sensor ESP32 to this master over ESP-NOW.
+// No hour/month fields -- the sensor node has no WiFi/NTP of its own to
+// source them from (see esp32/include/config.h's "Radio" section). This
+// board now supplies hour itself for the model (currentHour() in main.cpp,
+// using its own NTP sync); month was already unused by the retrained model
+// before this change.
 struct SensorPacket {
     uint32_t seq;
     float    temperature;
     float    humidity;
     float    ammonia_ppm;
-    uint8_t  hour;    // 0-23 local time (NTP-synced on sensor side)
-    uint8_t  month;   // 1-12
 };
 
 // ActuatorCommand is sent back from this master to the sensor ESP32.

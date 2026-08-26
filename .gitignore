@@ -38,7 +38,10 @@ hardware/esp32s3_master/.pio/
 hardware/esp32s3_master/.pioenvs/
 
 # Credentials -- NEVER commit these
-hardware/esp32/include/credentials.h
+# (the main sensor node firmware, hardware/esp32/src/main.cpp, no longer
+# joins WiFi at all -- ESP-NOW only, fixed channel, see its config.h -- so
+# it has no credentials.h of its own anymore; the two standalone bench-test
+# sketches below are unrelated and still use WiFi for their own purposes.)
 hardware/esp32/test_heater_relay/include/credentials.h
 hardware/esp32/test_actuator_bridge/include/credentials.h
 hardware/esp32s3_master/include/credentials.h

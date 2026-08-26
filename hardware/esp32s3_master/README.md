@@ -141,9 +141,15 @@ Steps, in order:
 
 1. Install PlatformIO (CLI or the VS Code extension).
 2. Copy `include/credentials.h.example` to `include/credentials.h` and fill
-   in `WIFI_SSID` / `WIFI_PASSWORD` -- **must be the same network the sensor
-   node joins.** ESP-NOW requires both peers on the same WiFi channel;
-   joining the same AP is the simplest way to guarantee that.
+   in `WIFI_SSID` / `WIFI_PASSWORD` for this board's own network -- the
+   sensor node has no WiFi credentials of its own to match; it never joins
+   any AP (see `../esp32/README.md`). ESP-NOW still requires both radios on
+   the same WiFi channel, so the sensor node hardcodes a fixed channel
+   (`ESPNOW_WIFI_CHANNEL`, `../esp32/include/config.h`) instead -- if this
+   board's router ever assigns a different channel than that constant, this
+   board logs a boot-time `[WIFI] WARNING` (it can't fix the mismatch
+   itself; update the sensor's config.h and reflash it, or fix the
+   router's channel).
 3. `pio run -t upload` (or use the PlatformIO IDE build/upload buttons),
    then open the serial monitor at 115200 baud. No Django IP to configure --
    see Discovery below.
@@ -189,8 +195,10 @@ send `ActuatorCommand`s back.
 
 ## Data flow per sample
 
-1. Sensor node sends a `SensorPacket` (temperature, humidity, ammonia_ppm,
-   hour, month) over ESP-NOW every 5 s.
+1. Sensor node sends a `SensorPacket` (temperature, humidity, ammonia_ppm --
+   no hour/month; it has no WiFi/NTP to source them from) over ESP-NOW
+   every 5 s. This board supplies hour itself from its own NTP sync
+   (`currentHour()` in `main.cpp`) for the model's hour-of-day feature.
 2. This board averages incoming samples into a rolling 10-minute bucket and
    keeps a 7-bucket finalized history (`model_runner.cpp`) -- see "Model
    architecture" above for why. That history needs to fill before the first
@@ -230,6 +238,23 @@ Django echoes `kAmmoniaSpikeThreshold`'s value as
 dashboard never hardcodes a second copy. If the model is ever retrained
 with different thresholds, update both places together.
 
+## Sensor silence watchdog
+
+If no `SensorPacket` arrives over ESP-NOW for `SENSOR_SILENCE_TIMEOUT_MS`
+(`config.h`, 3x the sensor's 5s `SAMPLE_INTERVAL_MS` -- ~15s), `loop()`
+logs `[ESPNOW] No sensor packet in ... -- re-initializing ESP-NOW.` and
+re-runs the same `esp_now_deinit()`/`initEspNow()`/`registerSensorPeer()`
+recovery sequence already used when this board's own WiFi reconnects (see
+`ensureWifi()`). This covers a stuck ESP-NOW stack that didn't involve a
+WiFi drop on this board -- distinct from `postToDjango()`'s existing
+3-failures-triggers-re-discovery logic, which reacts to failed HTTP POSTs
+to Django, not to sensor silence. Cheap and safe to fire repeatedly: it
+doesn't touch the model's bucket history, so a real but brief sensor outage
+doesn't cost the ~70 minute warm-up. If the sensor node is genuinely
+powered off, this just keeps retrying every window until it comes back --
+it can't fix a truly-dead sensor by itself, only re-arm this board's own
+side of the link in case that was the actual problem.
+
 ## Known limitations
 
 - Single sensor node only: the feature/history buffers assume one upstream
@@ -242,3 +267,10 @@ with different thresholds, update both places together.
 - If the Django POST fails (network blip, backend restart), that sample's
   classification never reaches the sensor node and its actuators simply
   hold their last commanded state.
+- The sensor node hardcodes its ESP-NOW channel instead of negotiating one
+  (see "Flashing" above) -- if the router's channel ever changes, ESP-NOW
+  silently breaks until `ESPNOW_WIFI_CHANNEL` is updated and the sensor
+  node reflashed. This board logs a warning when it detects the mismatch,
+  but can't self-heal it (unlike the silence watchdog above, which only
+  helps when this board's own ESP-NOW stack -- not the channel itself --
+  is the problem).

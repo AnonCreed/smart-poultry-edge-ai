@@ -10,11 +10,13 @@ control) and PTC heater (ON/OFF relay -- see `HEATER_RELAY_ON`/`_OFF` in
 `include/config.h` for this board's relay polarity), closing the control
 loop end-to-end across the two boards.
 
-This board still joins WiFi (see `include/config.h`), but only to (a) land
-on the same channel as the master -- ESP-NOW requires both peers on the
-same channel, and joining the same AP is the simplest way to guarantee that
--- and (b) sync wall-clock time over NTP for the model's hour/month cyclic
-features. It no longer POSTs to Django directly; see
+This board has **no WiFi at all** -- no credentials, no AP join, no IP, no
+NTP. It only brings the radio up to speak ESP-NOW directly to the master,
+on a fixed channel set at compile time (`ESPNOW_WIFI_CHANNEL`,
+`include/config.h`) since there's no AP association to inherit a channel
+from. See `include/config.h`'s "Radio" section for why the channel is
+fixed rather than negotiated, and what to do if it ever needs to change.
+This board never talks to Django directly either; see
 `../esp32s3_master/README.md` for the full two-board pipeline and the MAC
 pairing procedure required before either board can talk to the other.
 
@@ -48,9 +50,9 @@ Two constraints are non-negotiable:
 
 ```bash
 cd hardware/esp32
-# Edit include/config.h: WIFI_SSID, WIFI_PASSWORD, MASTER_MAC_ADDR
-# (see the MAC pairing procedure in ../esp32s3_master/README.md), and
-# GMT_OFFSET_SEC for your timezone.
+# Edit include/config.h: MASTER_MAC_ADDR (see the MAC pairing procedure in
+# ../esp32s3_master/README.md) and ESPNOW_WIFI_CHANNEL if your router isn't
+# on channel 1. No WiFi credentials to set -- this board has none.
 pio run                 # Compile
 pio run -t upload       # Flash over USB
 pio device monitor      # Serial console at 115200 baud
@@ -77,7 +79,7 @@ hour burn-in:
 4. Reflash.
 
 Without this step the reported PPM has a per-unit multiplicative error that
-can easily reach 3-5x. The classifier threshold (25 PPM CRITICAL) is set
+can easily reach 3-5x. The classifier threshold (15 PPM CRITICAL) is set
 against calibrated readings, so uncalibrated sensors will either false-alarm
 or, worse, miss real breaches.
 
@@ -183,9 +185,9 @@ predictions once warmed up) before advancing to the next, looping forever:
 | Scenario | Tests |
 |---|---|
 | `OPTIMAL_BASELINE` | Warm-up baseline; nothing should trip. |
-| `AMMONIA_STEP_CRITICAL` / `_RECOVER` | Instant step across the 25 ppm `CRITICAL_AMMONIA` threshold, both directions -- classification latency, actuator response speed. |
+| `AMMONIA_STEP_CRITICAL` / `_RECOVER` | Instant step across the 15 ppm `CRITICAL_AMMONIA` threshold, both directions -- classification latency, actuator response speed. |
 | `AMMONIA_RAMP_TO_SPIKE` / `_RECOVER` | Gradual rise/fall through the threshold -- does `predicted_ammonia` (the forecast) lead the live reading, and does `predicted_spike_probability` rise before the classifier actually flips? |
-| `AMMONIA_BOUNDARY_LOW` / `_HIGH` | Held just under/over 25 ppm -- exact threshold correctness, no off-by-one. |
+| `AMMONIA_BOUNDARY_LOW` / `_HIGH` | Held just under/over 15 ppm -- exact threshold correctness, no off-by-one. |
 | `HEAT_STRESS_STEP` / `_RECOVER` | T + RH combined past both thresholds at once (the classifier's conjunction rule) and back. |
 | `LOW_TEMP_STEP` / `_RECOVER` | Below 18°C and back -- heater relay reactivity. |
 | `COLD_AND_CRITICAL_AMMONIA` / `_RECOVER` | Cold and critical ammonia at once -- `predicted_class` comes back `CRITICAL_AMMONIA` only (classify_environment() checks ammonia first), so this is the regression case for the `low_temperature_alert` fix: both fan **and** heater must activate, not just the fan. |

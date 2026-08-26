@@ -24,15 +24,17 @@
 
 #include <cstdint>
 
-// One raw sample as received from the sensor node over ESP-NOW.
+// One raw sample as received from the sensor node over ESP-NOW, with hour
+// filled in locally by this board (currentHour() in main.cpp) rather than
+// the sensor -- it has no WiFi/NTP of its own to source a clock from (see
+// esp32/include/config.h's "Radio" section). No month field: the training
+// pipeline never derives a month-cyclic feature, so there was never a
+// reason to carry one once the sensor stopped supplying its own hour too.
 struct RawSample {
     float   temperature;
     float   humidity;
     float   ammonia_ppm;
-    uint8_t hour;   // 0-23 local time (NTP-synced on the sensor side)
-    uint8_t month;  // 1-12 -- unused by this model (kept only for wire
-                     // compatibility with SensorPacket; the training
-                     // pipeline never derives a month-cyclic feature).
+    uint8_t hour;   // 0-23 local time
 };
 
 struct ModelPrediction {

@@ -2,8 +2,13 @@
 // main.cpp -- ESP32-S3 master node firmware.
 //
 // Responsibilities:
-//   1. Connect to WiFi, print own MAC address (needed to configure sensor node).
-//   2. Register as ESP-NOW receiver; accept SensorPacket from the sensor ESP32.
+//   1. Connect to WiFi, print own MAC address (needed to configure sensor
+//      node), and sync NTP -- the sole source of wall-clock time for the
+//      model's hour-of-day feature now, since the sensor node has no WiFi
+//      of its own (see esp32/include/config.h's "Radio" section).
+//   2. Register as ESP-NOW receiver; accept SensorPacket from the sensor
+//      ESP32. If none arrives for 3x its expected interval, self-heal by
+//      re-initializing ESP-NOW (see the watchdog block in loop()).
 //   3. On each received packet, POST the data to the Django telemetry API.
 //   4. Parse the HTTP 201 response to extract predicted_class.
 //   5. Send ActuatorCommand back to the sensor ESP32 over ESP-NOW so it can
@@ -25,6 +30,7 @@
 #include <HTTPClient.h>
 #include <esp_now.h>
 #include <ArduinoJson.h>
+#include <time.h>  // getLocalTime() -- see currentHour() below
 
 #include "config.h"
 #include "model_runner.h"
@@ -39,6 +45,13 @@ static volatile bool g_newPacket  = false;
 static uint8_t       g_sensorMac[6] = {0};
 static bool          g_sensorKnown  = false;
 static portMUX_TYPE  g_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// millis() timestamp of the last SensorPacket actually received, and of the
+// last watchdog-triggered ESP-NOW re-init -- see the silence check in
+// loop(). Seeded at the end of setup() (not left at 0/epoch) so the
+// silence window starts counting from this board's own boot, giving the
+// sensor node time to boot and start transmitting before being flagged.
+static uint32_t g_lastPacketRxMs = 0;
 
 // Django host, found via UDP broadcast discovery instead of a hardcoded IP
 // (see discoverDjangoHost() below). Empty/unknown until discovery succeeds.
@@ -87,6 +100,22 @@ static void connectWifi() {
             Serial.printf("[WIFI] Connected. IP=%s  Channel=%d  RSSI=%d dBm\n",
                           WiFi.localIP().toString().c_str(),
                           WiFi.channel(), WiFi.RSSI());
+            // The sensor node hardcodes its ESP-NOW channel (it has no AP
+            // to negotiate one from -- see esp32/include/config.h's
+            // "Radio" section) instead of following this router
+            // dynamically. If the router ever assigns a different channel
+            // than the sensor is fixed to, ESP-NOW between the two boards
+            // goes silently dead -- flag it loudly here since there's
+            // nothing this board can do about it besides tell the operator.
+            if (WiFi.channel() != ESPNOW_WIFI_CHANNEL) {
+                Serial.printf("[WIFI] WARNING: router assigned channel %d but the "
+                              "sensor node is hardcoded to channel %d "
+                              "(ESPNOW_WIFI_CHANNEL, esp32/include/config.h) -- "
+                              "ESP-NOW will NOT work until these match. Update the "
+                              "sensor's config.h and reflash it, or fix the "
+                              "router's channel.\n",
+                              WiFi.channel(), ESPNOW_WIFI_CHANNEL);
+            }
             return;
         }
         delay(WIFI_RETRY_MS);
@@ -127,6 +156,30 @@ static void ensureWifi() {
     // A reconnect can mean a new DHCP lease -- possibly for the Django PC
     // too -- so don't trust the previously-discovered host anymore.
     g_djangoKnown = false;
+}
+
+// Last-known local hour, used as a fallback if NTP hasn't synced (or has
+// lapsed) so the model's hour_sin/hour_cos cyclic features stay in a
+// plausible (not pathological) range rather than going stale forever.
+// Seeded to a neutral noon default, same fallback pattern the sensor node
+// used to use for its own now-removed currentHourMonth().
+static uint8_t g_lastHour = 12;
+
+/**
+ * Read current local hour for the model's hour_sin/hour_cos cyclic
+ * features. The sensor node has no WiFi/NTP of its own anymore (see
+ * esp32/include/config.h's "Radio" section) -- this board is the only one
+ * with a wall-clock, so it now supplies hour itself instead of trusting a
+ * value in the SensorPacket (which no longer carries one at all). Falls
+ * back to the last successfully-read hour rather than propagating a hard
+ * failure, since inference must not stall on a clock read.
+ */
+static uint8_t currentHour() {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 0)) {
+        g_lastHour = static_cast<uint8_t>(timeinfo.tm_hour);
+    }
+    return g_lastHour;
 }
 
 // ----------------------------------------------------------------------------
@@ -479,10 +532,41 @@ void setup() {
     }
 
     Serial.println("[BOOT] Ready. Waiting for sensor packets over ESP-NOW...");
+
+    // Start the sensor-silence watchdog's window from boot, not from
+    // millis()==0 -- see g_lastPacketRxMs's doc comment.
+    g_lastPacketRxMs = millis();
 }
 
 void loop() {
     ensureWifi();
+
+    // Sensor silence watchdog: if no SensorPacket has arrived in 3x the
+    // sensor's expected transmission interval, the ESP-NOW stack itself may
+    // be stuck without this board's own WiFi ever having dropped (the case
+    // ensureWifi()'s reconnect-triggered re-init above doesn't cover). Cheap
+    // self-heal: re-run the identical esp_now_deinit()/initEspNow()/
+    // registerSensorPeer() sequence. Harmless no-op if the sensor is
+    // genuinely powered off -- it just keeps retrying every window; doesn't
+    // touch the model's bucket history, so a brief real outage doesn't cost
+    // the ~70 min warm-up.
+    {
+        static uint32_t lastWatchdogRecoveryMs = 0;
+        const uint32_t sinceLastPacket = millis() - g_lastPacketRxMs;
+        if (sinceLastPacket > SENSOR_SILENCE_TIMEOUT_MS &&
+            millis() - lastWatchdogRecoveryMs > SENSOR_SILENCE_TIMEOUT_MS) {
+            lastWatchdogRecoveryMs = millis();
+            Serial.printf("[ESPNOW] No sensor packet in %lu ms (>= 3x expected "
+                          "interval) -- re-initializing ESP-NOW.\n",
+                          (unsigned long)sinceLastPacket);
+            esp_now_deinit();
+            if (!initEspNow()) {
+                Serial.println("[ESPNOW] Watchdog re-init failed -- will retry next window.");
+            } else if (g_sensorKnown) {
+                registerSensorPeer();
+            }
+        }
+    }
 
     // Keep trying to (re)discover the Django host in the background --
     // covers "Django hadn't started yet at boot" and "its IP just changed"
@@ -523,6 +607,7 @@ void loop() {
     pkt = g_packet;
     g_newPacket = false;
     portEXIT_CRITICAL(&g_mux);
+    g_lastPacketRxMs = millis();  // Feeds the silence watchdog above.
 
     // Auto-register sensor as ESP-NOW peer on first packet.
     static bool peerAdded = false;
@@ -531,16 +616,16 @@ void loop() {
         peerAdded = true;
     }
 
-    Serial.printf("[RX] seq=%u T=%.1fC RH=%.1f%% NH3=%.1fppm hour=%u month=%u\n",
-                  pkt.seq, pkt.temperature, pkt.humidity,
-                  pkt.ammonia_ppm, pkt.hour, pkt.month);
+    Serial.printf("[RX] seq=%u T=%.1fC RH=%.1f%% NH3=%.1fppm\n",
+                  pkt.seq, pkt.temperature, pkt.humidity, pkt.ammonia_ppm);
 
     // Run on-device inference. Each raw sample feeds a rolling 10-minute
     // bucket internally (see model_runner.cpp) -- returns false almost every
     // call, and only ever produces a fresh prediction once each ~10-minute
     // bucket finalizes, needing 7 finalized buckets (~70 min after boot)
-    // before the first one.
-    RawSample raw{pkt.temperature, pkt.humidity, pkt.ammonia_ppm, pkt.hour, pkt.month};
+    // before the first one. hour comes from this board's own clock now
+    // (currentHour() above), not the packet -- see RawSample's doc comment.
+    RawSample raw{pkt.temperature, pkt.humidity, pkt.ammonia_ppm, currentHour()};
     ModelPrediction pred;
     const bool havePrediction = model_runner::predict(raw, g_flockAgeWeeks, pred);
     if (havePrediction) {

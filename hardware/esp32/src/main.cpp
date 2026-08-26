@@ -2,10 +2,12 @@
 // main.cpp -- Poultry Telemetry ESP32 sensor-node firmware.
 //
 // Responsibilities, in order of execution priority:
-//   1. Maintain WiFi association; reconnect with linear back-off on drop.
-//      (Needed only for channel alignment with the ESP32-S3 master and for
-//      NTP time -- see the network note in config.h. This node no longer
-//      speaks HTTP to Django; the master owns that leg.)
+//   1. Bring up the WiFi radio on a fixed channel (ESPNOW_WIFI_CHANNEL,
+//      config.h) WITHOUT joining any access point -- this board has no
+//      network credentials, gets no IP, and talks to nothing but the
+//      ESP32-S3 master, over ESP-NOW only. See the "Radio" section of
+//      config.h for why the channel has to be fixed at compile time instead
+//      of negotiated by joining an AP.
 //   2. Sample DHT11 (temperature, humidity) and MQ-137 (ammonia PPM) on a
 //      fixed 5 s cadence.
 //   3. Send a compact binary SensorPacket over ESP-NOW to the ESP32-S3
@@ -34,8 +36,8 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>  // esp_wifi_set_channel() -- fixed-channel ESP-NOW, no AP join
 #include <esp_now.h>
-#include <time.h>
 #include <DHT.h>
 #include <math.h>
 #include <Wire.h>
@@ -49,9 +51,10 @@
 static DHT dht(PIN_DHT_DATA, DHT11);
 static LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 
-// Millis() timestamp of the last completed sample cycle. Deliberately
-// separate from FreeRTOS timers so the schedule survives temporary WiFi
-// stalls without drift accumulating on the reconnect side.
+// Millis() timestamp of the last completed sample cycle. millis()-based
+// (not a FreeRTOS timer) so the schedule is unaffected by anything else
+// going on in loop() -- there's no WiFi reconnect path to drift against
+// anymore now that this board doesn't join an AP.
 static uint32_t nextSampleAt = 0;
 static uint32_t txSeq = 0;
 
@@ -59,14 +62,17 @@ static uint32_t txSeq = 0;
 // Wire contract shared with esp32s3_master/esp32s3_inference_receiver.ino.
 // Field order/types must stay byte-identical on both sides -- this struct
 // is copied directly out of the ESP-NOW payload with memcpy, no serializer.
+//
+// No hour/month fields -- this board has no WiFi/NTP of its own to source
+// them from (see config.h's Radio section). The master supplies hour
+// itself now (currentHour() in esp32s3_master/src/main.cpp); month was
+// already unused by the retrained model before this change.
 // ----------------------------------------------------------------------------
 struct SensorPacket {
     uint32_t seq;
     float temperature;
     float humidity;
     float ammonia_ppm;
-    uint8_t hour;   // 0-23, local time
-    uint8_t month;  // 1-12
 };
 
 // Classification vocabulary the master relays back -- must remain
@@ -104,11 +110,6 @@ static ActuatorCommand g_lastCommand;
 static volatile bool g_newCommand = false;
 static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Last-known wall-clock fields, used as a fallback if NTP sync fails so the
-// model's cyclic features stay in a plausible (not pathological) range.
-static uint8_t lastHour = 12;
-static uint8_t lastMonth = 6;
-
 // ----------------------------------------------------------------------------
 // LCD display state
 // ----------------------------------------------------------------------------
@@ -129,64 +130,19 @@ static bool  g_haveReading    = false;
 static bool g_lcdPresent = false;
 
 // ============================================================================
-// WiFi lifecycle
+// Radio -- ESP-NOW only, fixed channel, no AP join (see config.h's "Radio"
+// section for why). Nothing here ever calls WiFi.begin() or checks
+// WiFi.status(); there is no association to lose or reconnect, so unlike
+// the master's ensureWifi(), there's no equivalent to run from loop().
 // ============================================================================
-static void connectWifi() {
+static void initRadio() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);  // Latency over power savings for control loop.
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    Serial.printf("[WIFI] Associating with SSID '%s'\n", WIFI_SSID);
-    for (int attempt = 0; attempt < WIFI_MAX_RETRIES; ++attempt) {
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("[WIFI] Link up. IP=%s RSSI=%d dBm Channel=%d\n",
-                          WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
-            return;
-        }
-        delay(WIFI_RETRY_MS);
-        Serial.printf("[WIFI] retry %d/%d\n", attempt + 1, WIFI_MAX_RETRIES);
-    }
-    Serial.println("[WIFI] Association failed; will retry on next tick.");
-}
-
-static void ensureWifi() {
-    if (WiFi.status() == WL_CONNECTED) return;
-    Serial.println("[WIFI] Link lost -- reconnecting.");
-    WiFi.disconnect(true, true);
-    connectWifi();
-}
-
-/**
- * Sync wall-clock time over NTP. Only meaningful while WiFi is associated;
- * called once at boot and again on every reconnect since a dropped link may
- * have let the RTC drift uncorrected for a while.
- */
-static void syncNtpTime() {
-    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
-    struct tm timeinfo;
-    if (getLocalTime(&timeinfo, NTP_SYNC_TIMEOUT_MS)) {
-        Serial.printf("[NTP] Synced: %04d-%02d-%02d %02d:%02d:%02d\n",
-                      timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                      timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-    } else {
-        Serial.println("[NTP] Sync failed -- hour/month features will use last-known/default values.");
-    }
-}
-
-/**
- * Read current local hour/month for the model's cyclic features. Falls back
- * to the last successfully-read values (seeded to a neutral noon/June
- * default) rather than propagating a hard failure, since sensor sampling
- * must not stall on a clock read.
- */
-static void currentHourMonth(uint8_t& hour, uint8_t& month) {
-    struct tm timeinfo;
-    if (getLocalTime(&timeinfo, 0)) {
-        lastHour = static_cast<uint8_t>(timeinfo.tm_hour);
-        lastMonth = static_cast<uint8_t>(timeinfo.tm_mon + 1);
-    }
-    hour = lastHour;
-    month = lastMonth;
+    WiFi.disconnect();     // Defensive -- make sure nothing auto-joins.
+    esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    Serial.printf("[RADIO] WiFi radio up on fixed channel %d (no AP join -- "
+                  "ESP-NOW only). Local MAC=%s\n",
+                  ESPNOW_WIFI_CHANNEL, WiFi.macAddress().c_str());
 }
 
 // ============================================================================
@@ -416,7 +372,9 @@ static bool initEspNow() {
 
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, masterMac, 6);
-    peer.channel = 0;  // 0 == use the current WiFi STA channel.
+    peer.channel = 0;  // 0 == use the radio's current channel (the fixed
+                        // ESPNOW_WIFI_CHANNEL set by initRadio(), not one
+                        // negotiated via an AP join -- this board has none).
     peer.encrypt = false;
     if (esp_now_add_peer(&peer) != ESP_OK) {
         Serial.println("[ESPNOW] Failed to register master as peer.");
@@ -437,7 +395,6 @@ static bool sendSample(float temperatureC, float humidityPct, float ammoniaPpm) 
     packet.temperature = temperatureC;
     packet.humidity = humidityPct;
     packet.ammonia_ppm = ammoniaPpm;
-    currentHourMonth(packet.hour, packet.month);
 
     const esp_err_t result = esp_now_send(
         masterMac, reinterpret_cast<const uint8_t*>(&packet), sizeof(packet)
@@ -544,8 +501,7 @@ void setup() {
                       LCD_I2C_ADDR);
     }
 
-    connectWifi();
-    syncNtpTime();
+    initRadio();
 
     if (!initEspNow()) {
         Serial.println("[BOOT] ESP-NOW bring-up failed; halting.");
@@ -558,7 +514,9 @@ void setup() {
 }
 
 void loop() {
-    ensureWifi();
+    // No WiFi association to maintain -- initRadio() set a fixed ESP-NOW
+    // channel once at boot and there's nothing to reconnect (see config.h's
+    // "Radio" section).
 
     // Apply any actuator command relayed back from the master since the
     // last loop iteration, independent of the sampling cadence below.

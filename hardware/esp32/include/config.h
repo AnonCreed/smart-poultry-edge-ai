@@ -8,19 +8,32 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// Network
+// Radio -- ESP-NOW only, no WiFi AP join
 // ---------------------------------------------------------------------------
-// WiFi credentials are loaded from credentials.h (gitignored).
-// Copy esp32/include/credentials.h.example -> credentials.h and fill in
-// your SSID and password before building.
+// This node has no network credentials and never associates with any WiFi
+// access point -- it only uses the WiFi radio hardware to speak ESP-NOW
+// directly to the ESP32-S3 master (see HARDWARE_DOCUMENTATION.md "ESP-NOW
+// pipeline"). It doesn't talk to Django, doesn't get an IP, and doesn't sync
+// NTP; the master owns the WiFi/HTTP leg to Django and is now also the
+// source of wall-clock time for the model's hour-of-day cyclic feature (see
+// currentHour() in esp32s3_master/src/main.cpp) since this board no longer
+// has a clock of its own.
 //
-// This node no longer talks to Django directly (see HARDWARE_DOCUMENTATION.md
-// "ESP-NOW pipeline"): it joins the WiFi AP only so it (a) lands on the same
-// 2.4 GHz channel as the ESP32-S3 master, which ESP-NOW requires, and (b) can
-// pull real wall-clock time via NTP for the model's hour/month cyclic
-// features. Telemetry itself goes out over ESP-NOW to MASTER_MAC_ADDR below;
-// the master owns the WiFi/HTTP leg to Django.
-#include "credentials.h"
+// ESP-NOW requires both peers' radios on the SAME WiFi channel. Previously
+// this board guaranteed that by joining the same AP as the master and
+// letting the router assign the channel to both; without an AP join, the
+// channel has to be fixed at compile time instead:
+#define ESPNOW_WIFI_CHANNEL 1
+// ^ Must match whatever channel the ESP32-S3 master's WiFi actually lands
+// on -- check the master's boot log line "[WIFI] Connected. IP=... Channel=N
+// ...". Channel 1 is what this project's router has consistently assigned
+// on every boot observed so far, but routers with auto-channel-select can
+// change it (e.g. after a reboot or interference-driven reshuffle) -- if
+// ESP-NOW packets silently stop arriving at the master despite this board's
+// [TX] lines looking normal, check the master's actual channel first. The
+// master logs a boot-time warning if its own channel doesn't match this
+// value, but can't fix a mismatch itself -- update this constant and
+// reflash this board if it happens.
 
 // MAC address of the ESP32-S3 master node's WiFi station interface. Flash
 // esp32s3_master/ first and copy the "[BOOT] Master MAC (WiFi STA): XX:XX:XX:XX:XX:XX"
@@ -30,25 +43,12 @@
 // reflashed onto different hardware (a new board has a different MAC).
 #define MASTER_MAC_ADDR { 0xDC, 0xB4, 0xD9, 0x14, 0x14, 0x6C }
 
-// NTP time source for the model's hour-of-day / month-of-year cyclic
-// features (see esp32s3_master/esp32s3_inference_receiver.ino).
-// GMT_OFFSET_SEC = 20700 = Nepal Standard Time (UTC+5:45).
-#define NTP_SERVER            "pool.ntp.org"
-#define GMT_OFFSET_SEC         20700
-#define DAYLIGHT_OFFSET_SEC    0
-#define NTP_SYNC_TIMEOUT_MS    5000
-
 // ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
 // Transmit cadence must match the dashboard's polling interval (5 s) so the
 // chart tail advances one point per refresh -- no aliasing or empty ticks.
 #define SAMPLE_INTERVAL_MS 5000
-
-// WiFi reconnect back-off: linear, capped. Wall-clock reconnection latency
-// stays below one sample interval even at the ceiling.
-#define WIFI_RETRY_MS      2000
-#define WIFI_MAX_RETRIES   10
 
 // BENCHMARK_MODE only (see platformio.ini's esp32dev_benchmark environment
 // and sampleBenchmark() in main.cpp). How many samples each synthetic
@@ -67,10 +67,12 @@
 #define PIN_DHT_DATA    4
 
 // MQ-137 analog output. GPIO34 is INPUT-ONLY on the classic ESP32 and is
-// wired to ADC1 channel 6 -- ADC1 is the only ADC block usable while WiFi
-// is active, so this channel selection is mandatory, not incidental.
-// Sensor output must be scaled to 0-3.3 V by an external divider before
-// reaching this pin; MQ modules that swing to 5 V will damage the SoC.
+// wired to ADC1 channel 6 -- ADC1 is the only ADC block usable while the
+// WiFi radio is active, so this channel selection is mandatory, not
+// incidental (this board keeps its radio on continuously for ESP-NOW even
+// though it never joins an AP -- see the Radio section above). Sensor
+// output must be scaled to 0-3.3 V by an external divider before reaching
+// this pin; MQ modules that swing to 5 V will damage the SoC.
 #define PIN_MQ_DATA     34
 
 // Fan PWM output (speed target). Series 200 Ohm gate resistor (R5) is on

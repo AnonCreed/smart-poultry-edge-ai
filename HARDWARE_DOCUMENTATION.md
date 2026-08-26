@@ -66,13 +66,13 @@
 - How it operates inside the code:
   - Provides setup(), loop(), millis(), delay(), analogRead(), ledcSetup(), ledcWrite(), String, Serial.
 
-2. WiFi.h
+2. WiFi.h / esp_wifi.h
 - Which library is used:
-  - ESP32 Wi-Fi station client stack wrapper.
+  - ESP32 Wi-Fi radio wrapper (Arduino core) plus the lower-level esp_wifi_set_channel() from the IDF.
 - Why chosen:
-  - Native ESP32 Arduino networking API with reliable STA mode support. Retained on this board even though it no longer speaks HTTP, because ESP-NOW needs a WiFi interface to be up and on the right channel, and NTP time sync needs an IP link.
+  - This board never associates with any access point -- no credentials, no IP, no HTTP, no NTP. WiFi.h is retained purely to bring the radio hardware up (WiFi.mode(WIFI_STA)) and read its own MAC address; esp_wifi_set_channel() then pins that radio to a fixed channel (ESPNOW_WIFI_CHANNEL, config.h) so ESP-NOW can reach the ESP32-S3 master without ever joining its AP. See config.h's "Radio" section for why the channel has to be fixed at compile time instead of negotiated by joining an AP (as this board used to do, and as the master still does for its own WiFi/HTTP leg to Django).
 - How it operates inside the code:
-  - WiFi.mode(WIFI_STA), WiFi.setSleep(false), WiFi.begin(...), WiFi.status(), WiFi.disconnect(...), WiFi.localIP(), WiFi.RSSI(), WiFi.channel().
+  - WiFi.mode(WIFI_STA), WiFi.setSleep(false), WiFi.disconnect() (defensive, prevents any auto-join attempt), esp_wifi_set_channel(ESPNOW_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE), WiFi.macAddress().
 
 3. esp_now.h
 - Which library is used:
@@ -82,18 +82,10 @@
 - How it operates inside the code:
   - esp_now_init(), esp_now_register_send_cb/esp_now_register_recv_cb, esp_now_add_peer(), esp_now_send().
 
-4. time.h
-- Which library is used:
-  - Standard C time API, used via the Arduino core's configTime()/getLocalTime() NTP helpers.
-- Why chosen:
-  - The master's model needs hour-of-day/month-of-year cyclic features; this board is the one with a WiFi link, so it is the natural place to source wall-clock time and forward it alongside each sample.
-- How it operates inside the code:
-  - configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER) once after WiFi connects; getLocalTime(&timeinfo, ...) per sample to populate SensorPacket::hour/month.
-
-5. DHT.h
+4. DHT.h
 - Used to read DHT11 sensor values via DHT class.
 
-6. math.h
+5. math.h
 - Which library is used:
   - Standard math functions.
 - Why chosen:
@@ -101,7 +93,7 @@
 - How it operates inside the code:
   - ppm = MQ137_A * powf(ratio, MQ137_B).
 
-7. config.h (custom project header)
+6. config.h (custom project header)
 - Which header is used:
   - Firmware compile-time constants for networking, timing, pins, PWM, ADC calibration, MQ curve constants.
 - Why chosen:
@@ -132,7 +124,7 @@
 | USB-UART Serial (console) | UART0 default pins (board routed via USB bridge) | Debug/Interface | Digital UART | TX active-high line logic | Boot logs, diagnostics, telemetry printouts at 115200 baud. |
 
 ### Electrical and Pin-Selection Rationale
-- GPIO34 is input-only and mapped to ADC1, which remains usable while Wi-Fi is active; this is critical because ADC2 is unavailable during active Wi-Fi on classic ESP32. This still holds with ESP-NOW: the sensor node's WiFi interface stays associated (see below), so the same ADC1-while-WiFi constraint applies unchanged.
+- GPIO34 is input-only and mapped to ADC1, which remains usable while Wi-Fi is active; this is critical because ADC2 is unavailable during active Wi-Fi on classic ESP32. This still holds with ESP-NOW: the radio stays powered on a fixed channel for ESP-NOW the whole time (see below), even though this board never actually associates with an access point -- the same ADC1-vs-radio-active constraint applies either way.
 - Fan PWM (GPIO32) and its hard-cutoff MOSFET gate (GPIO27) are both general-purpose, non-strapping pins with nothing else assigned to them. The heater relay (GPIO25) is likewise general-purpose/non-strapping; unlike the fan, it's a plain ON/OFF relay module, not a PWM/LEDC channel.
 - DHT11 data line on GPIO4 is a common safe GPIO with external 10 kOhm pull-up assumption.
 
@@ -147,9 +139,9 @@ Sensor node (ESP32)  --ESP-NOW-->  Master node (ESP32-S3)  --WiFi/HTTP-->  Djang
 ```
 
 - Hop 1 -- sensor node to master, ESP-NOW:
-  - Physical/link: IEEE 802.11 Wi-Fi radio, used in ESP-NOW connectionless mode (no association/handshake, no IP).
+  - Physical/link: IEEE 802.11 Wi-Fi radio, used in ESP-NOW connectionless mode (no association/handshake, no IP). The sensor node never joins any access point at all -- it has no WiFi credentials, gets no IP, and speaks nothing but ESP-NOW; only the ESP32-S3 master joins the AP (for its own WiFi/HTTP leg to Django).
   - Transport/application: a fixed-layout `SensorPacket` C struct, sent with `esp_now_send()` directly to the master's MAC address -- no serialization, no HTTP.
-  - Both boards must share a WiFi channel for this to work; the design guarantees that by having both join the same AP (see the sensor node's `connectWifi()`) rather than by manually pinning a channel number.
+  - Both radios must still share a WiFi channel for ESP-NOW to work even without either side "connecting" in the usual sense -- previously guaranteed by having both boards join the same AP and inherit its channel; now the sensor node fixes its channel at compile time instead (`ESPNOW_WIFI_CHANNEL`, `esp32/include/config.h`), since it no longer has an AP to negotiate one from. The master still gets its channel from the router as before and logs a boot-time warning if the two ever disagree (see `esp32s3_master/include/config.h`'s `ESPNOW_WIFI_CHANNEL`).
 - Hop 2 -- master to Django, WiFi/HTTP (this is the leg the rest of this document originally described end-to-end; it is unchanged in mechanism, only relocated to the ESP32-S3 board):
   - Physical/link: IEEE 802.11 Wi-Fi in station mode.
   - Transport: TCP/IP.
@@ -158,14 +150,13 @@ Sensor node (ESP32)  --ESP-NOW-->  Master node (ESP32-S3)  --WiFi/HTTP-->  Djang
 - Return path -- Django's classification travels master -> sensor node over ESP-NOW as an `ActuatorCommand` struct, the mirror image of hop 1.
 
 ### Sensor Node Request Flow (per 5 s tick)
-1. loop() calls ensureWifi() each cycle; if disconnected, firmware performs full reconnect sequence (needed for channel alignment and NTP, not for data delivery).
+1. initRadio() runs once at boot (WiFi.mode(WIFI_STA) + esp_wifi_set_channel()) -- no per-loop WiFi maintenance call exists anymore, since there's no AP association to lose or reconnect.
 2. Any pending ActuatorCommand relayed from the master since the last iteration is applied via applyActuators() -- checked every loop iteration, independent of the sampling cadence.
 3. Sampling tick gate uses millis() against nextSampleAt; executes every SAMPLE_INTERVAL_MS (5000 ms).
 4. sampleDht() obtains humidity and temperature; invalid NAN data aborts current tick.
 5. sampleMq137() gathers 16 ADC samples on GPIO34 and averages.
-6. currentHourMonth() reads NTP-synced wall-clock time (falling back to the last-known value if a read fails).
-7. sendSample() populates a SensorPacket and calls esp_now_send() to the master's MAC address.
-8. onDataSent() (registered callback) logs delivery failure asynchronously; no application-level retry -- the next 5 s tick supersedes a lost sample.
+6. sendSample() populates a SensorPacket (temperature/humidity/ammonia_ppm only -- no hour/month; the master supplies hour itself from its own NTP sync, see the Master Node Flow below) and calls esp_now_send() to the master's MAC address.
+7. onDataSent() (registered callback) logs delivery failure asynchronously; no application-level retry -- the next 5 s tick supersedes a lost sample.
 
 ### Master Node Flow (per received packet)
 1. onDataRecv() copies the incoming SensorPacket out of the ESP-NOW payload under a critical section (runs in the WiFi task context).
@@ -182,8 +173,12 @@ ESP-NOW SensorPacket (sensor node -> master, binary struct, not JSON):
 - temperature (float)
 - humidity (float)
 - ammonia_ppm (float)
-- hour (uint8_t, 0-23)
-- month (uint8_t, 1-12)
+
+No hour/month fields -- the sensor node has no WiFi/NTP of its own (see
+"Hop 1" above), so it can't supply either. The master now reads its own
+NTP-synced clock (currentHour() in main.cpp) to source the hour-of-day
+cyclic feature the on-device model needs; month was already unused by the
+retrained model before this change.
 
 ESP-NOW ActuatorCommand (master -> sensor node, binary struct):
 - state (char[24], one of the four EnvironmentalState values)
