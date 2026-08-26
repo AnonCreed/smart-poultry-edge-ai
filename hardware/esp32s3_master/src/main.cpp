@@ -31,6 +31,7 @@
 #include <esp_now.h>
 #include <ArduinoJson.h>
 #include <time.h>  // getLocalTime() -- see currentHour() below
+#include <esp_system.h>  // esp_reset_reason() -- see logResetReason() below
 
 #include "config.h"
 #include "model_runner.h"
@@ -500,10 +501,40 @@ static bool fetchManualControl(uint8_t& outFanPwm, uint8_t& outHeaterPwm) {
 // ----------------------------------------------------------------------------
 // Arduino entrypoints
 // ----------------------------------------------------------------------------
+/**
+ * Logs WHY this boot happened -- a genuine power-on, or the chip recovering
+ * from a brownout/watchdog/panic/software reset. This board's model warm-up
+ * needs ~70 minutes of continuous uptime (see model_runner.h); any of the
+ * non-power-on reasons below silently wipes that progress and restarts the
+ * countdown, which is otherwise invisible from the outside -- the board
+ * just looks like it's "still warming up," indistinguishable from a slow
+ * but healthy run without this line. Kept permanently, not a throwaway
+ * diagnostic -- cheap, and the single most useful line for telling "it's
+ * just not done yet" apart from "it keeps getting interrupted."
+ */
+static void logResetReason() {
+    const char* reason;
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   reason = "POWERON (genuine cold boot / USB plug-in)"; break;
+        case ESP_RST_EXT:       reason = "EXT (external reset pin)"; break;
+        case ESP_RST_SW:        reason = "SW (software-triggered reset)"; break;
+        case ESP_RST_PANIC:     reason = "PANIC (crash)"; break;
+        case ESP_RST_INT_WDT:   reason = "INT_WDT (interrupt watchdog)"; break;
+        case ESP_RST_TASK_WDT:  reason = "TASK_WDT (task watchdog)"; break;
+        case ESP_RST_WDT:       reason = "WDT (other watchdog)"; break;
+        case ESP_RST_BROWNOUT:  reason = "BROWNOUT (power sagged below threshold)"; break;
+        case ESP_RST_SDIO:      reason = "SDIO"; break;
+        case ESP_RST_DEEPSLEEP: reason = "DEEPSLEEP wake"; break;
+        default:                reason = "UNKNOWN"; break;
+    }
+    Serial.printf("[BOOT] Reset reason: %s\n", reason);
+}
+
 void setup() {
     Serial.begin(115200);
     delay(200);
     Serial.println("\n[BOOT] Poultry Telemetry ESP32-S3 master node starting.");
+    logResetReason();
 
     connectWifi();
 
