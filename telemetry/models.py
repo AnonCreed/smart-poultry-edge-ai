@@ -247,6 +247,19 @@ class ActuatorControl(models.Model):
     relay-switched (on/off only, no variable power) -- only the fan has
     real PWM speed control.
 
+    MANUAL is not absolute, though: the same safety floor AUTO applies
+    (see `_apply_safety_floor()`) still wins over a MANUAL setting. Fan
+    and heater running together isn't blanket-forbidden -- there are
+    legitimate conditions where both are genuinely needed at once (e.g.
+    cold air that still needs circulating), so this isn't a fan-XOR-heater
+    interlock -- but an operator's MANUAL duty is only honored right up
+    until a live reading crosses a real safety threshold (critical
+    ammonia, heat stress, or genuine cold), at which point that threshold
+    overrides the manual setting automatically rather than waiting on the
+    operator to notice and intervene. This matters even with no animals
+    currently in the coop: the policy needs to be correct for when there
+    are.
+
     Effective duty is resolved server-side (not on-device) so a firmware
     client only has to relay one ready-to-apply command rather than
     re-implement this policy switch itself.
@@ -259,14 +272,23 @@ class ActuatorControl(models.Model):
         help_text="AUTO derives fan/heater duty from the latest classification; MANUAL uses the fields below.",
     )
     fan_speed_pct = models.PositiveSmallIntegerField(
-        default=0, help_text="Manual fan speed, 0-100%. Only applied while mode=MANUAL.",
+        default=0,
+        help_text=(
+            "Manual fan speed, 0-100%. Only applied while mode=MANUAL, and "
+            "even then only up until a live reading crosses a safety "
+            "threshold (critical ammonia or heat stress) -- see "
+            "effective_duty()'s safety floor, which overrides this."
+        ),
     )
     heater_power_pct = models.PositiveSmallIntegerField(
         default=0,
         help_text=(
             "Manual heater state, 0 (off) or 100 (on) only -- the heater is a "
             "relay switch, not PWM, so there's no variable power in between. "
-            "Only applied while mode=MANUAL."
+            "Only applied while mode=MANUAL, and even then only up until a "
+            "live reading crosses a safety threshold (genuine cold forces "
+            "it on, heat stress forces it off) -- see effective_duty()'s "
+            "safety floor, which overrides this."
         ),
     )
     updated_at = models.DateTimeField(auto_now=True)
@@ -291,6 +313,40 @@ class ActuatorControl(models.Model):
     AUTO_FAN_AMMONIA_SETPOINT_PPM = 5.0
     AUTO_FAN_AMMONIA_SCALE_PPM = 25.0
 
+    @staticmethod
+    def _apply_safety_floor(
+        fan_pct: int, heater_pct: int, state: str | None, is_low_temperature: bool,
+    ) -> tuple[int, int]:
+        """Force fan/heater to a safe duty when a live reading is already past
+        a critical threshold -- applied on top of EITHER mode's requested
+        duty (AUTO's forecast-derived value, or an operator's MANUAL
+        setting), never skipped for either. This is what makes MANUAL "not
+        absolute" per the class docstring: normal operation honors it
+        verbatim, but a live safety threshold always overrides it rather
+        than requiring the operator to notice and intervene.
+
+        Fan and heater are not blanket-interlocked here -- both can still
+        be forced on at once (e.g. genuinely cold air that still needs
+        circulating for air quality is a real condition, not a fault) --
+        this only forces specific safe values for specific thresholds:
+          - CRITICAL_AMMONIA or HEAT_STRESS_WARNING -> fan forced to 100%
+            (ventilate), regardless of forecast or MANUAL fan_speed_pct.
+          - HEAT_STRESS_WARNING -> heater forced to 0% (never heat while
+            already dangerously hot), regardless of MANUAL heater_power_pct.
+          - is_low_temperature (raw check, not the `state` label -- see
+            auto_duty_for_state()'s doc comment for why) -> heater forced
+            to 100%, regardless of MANUAL heater_power_pct. Can coexist
+            with a fan already forced on above (e.g. cold plus a
+            simultaneous critical ammonia reading) -- see class docstring.
+        """
+        if state in (EnvironmentalState.CRITICAL_AMMONIA, EnvironmentalState.HEAT_STRESS_WARNING):
+            fan_pct = 100
+        if state == EnvironmentalState.HEAT_STRESS_WARNING:
+            heater_pct = 0
+        if is_low_temperature:
+            heater_pct = 100
+        return fan_pct, heater_pct
+
     @classmethod
     def auto_duty_for_state(
         cls, state: str | None, predicted_ammonia: float | None = None,
@@ -313,18 +369,20 @@ class ActuatorControl(models.Model):
         """
         heater_pct = 100 if is_low_temperature else 0
 
-        # Safety floor: a live reading already past threshold always wins,
-        # regardless of what the forecast says.
-        if state in (EnvironmentalState.CRITICAL_AMMONIA, EnvironmentalState.HEAT_STRESS_WARNING):
-            return 100, heater_pct
-
         if predicted_ammonia is not None:
             nh3_error = max(predicted_ammonia - cls.AUTO_FAN_AMMONIA_SETPOINT_PPM, 0.0)
             fan_pct = round(min(nh3_error / cls.AUTO_FAN_AMMONIA_SCALE_PPM, 1.0) * 100)
-            return fan_pct, heater_pct
+        else:
+            # No forecast yet (Edge-AI link not up) -- pre-ESP32S3-link fallback.
+            fan_pct = 0
 
-        # No forecast yet (Edge-AI link not up) -- pre-ESP32S3-link fallback.
-        return 0, heater_pct
+        # Safety floor: a live reading already past threshold always wins,
+        # regardless of what the forecast says. (Redundant with the
+        # heater_pct computed above for a real reading -- is_low_temperature
+        # and HEAT_STRESS_WARNING can't both be true for the same reading --
+        # but shares the one implementation with MANUAL's copy below rather
+        # than risk the two drifting apart.)
+        return cls._apply_safety_floor(fan_pct, heater_pct, state, is_low_temperature)
 
     def effective_duty(
         self, latest_state: str | None, predicted_ammonia: float | None = None,
@@ -332,7 +390,9 @@ class ActuatorControl(models.Model):
     ) -> tuple[int, int]:
         """Resolve the (fan_pct, heater_pct) that should actually be applied right now."""
         if self.mode == ActuatorMode.MANUAL:
-            return self.fan_speed_pct, self.heater_power_pct
+            return self._apply_safety_floor(
+                self.fan_speed_pct, self.heater_power_pct, latest_state, is_low_temperature
+            )
         return self.auto_duty_for_state(latest_state, predicted_ammonia, is_low_temperature)
 
     def as_payload(

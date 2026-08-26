@@ -251,6 +251,62 @@ class ActuatorControlEndpointTests(TestCase):
         self.assertEqual(body["control"]["effective_heater_pct"], 100)
         self.assertEqual(ActuatorControl.objects.get().mode, "MANUAL")
 
+    def test_manual_fan_overridden_by_critical_ammonia_safety_floor(self):
+        # An operator's MANUAL fan setting is honored right up until a live
+        # reading crosses a real safety threshold -- it isn't absolute.
+        ActuatorControl.objects.create(mode="MANUAL", fan_speed_pct=0, heater_power_pct=0)
+        PoultryTelemetry.objects.create(
+            temperature=27.0, humidity=55.0, ammonia_level=40.0,
+            predicted_class=EnvironmentalState.CRITICAL_AMMONIA,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["mode"], "MANUAL")
+        self.assertEqual(control["fan_speed_pct"], 0)  # saved setting unchanged
+        self.assertEqual(control["effective_fan_pct"], 100)  # but overridden live
+
+    def test_manual_heater_forced_off_during_heat_stress(self):
+        # An operator manually holding the heater on must not be able to
+        # keep heating while the coop is already dangerously hot.
+        ActuatorControl.objects.create(mode="MANUAL", fan_speed_pct=0, heater_power_pct=100)
+        PoultryTelemetry.objects.create(
+            temperature=40.0, humidity=80.0, ammonia_level=3.0,
+            predicted_class=EnvironmentalState.HEAT_STRESS_WARNING,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["heater_power_pct"], 100)  # saved setting unchanged
+        self.assertEqual(control["effective_heater_pct"], 0)  # forced off live
+        self.assertEqual(control["effective_fan_pct"], 100)  # and fan forced on
+
+    def test_manual_heater_forced_on_when_genuinely_cold(self):
+        # An operator manually holding the heater off must not be able to
+        # leave it off while it's genuinely cold.
+        ActuatorControl.objects.create(mode="MANUAL", fan_speed_pct=0, heater_power_pct=0)
+        PoultryTelemetry.objects.create(
+            temperature=10.0, humidity=50.0, ammonia_level=3.0,
+            predicted_class=EnvironmentalState.LOW_TEMP_ALERT,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["heater_power_pct"], 0)  # saved setting unchanged
+        self.assertEqual(control["effective_heater_pct"], 100)  # forced on live
+
+    def test_manual_fan_and_heater_run_together_without_safety_override(self):
+        # No blanket fan/heater interlock: with no safety threshold crossed,
+        # a MANUAL setting that turns both on at once is honored as-is --
+        # there are legitimate conditions (e.g. circulating already-cold
+        # air) where both are genuinely needed together.
+        ActuatorControl.objects.create(mode="MANUAL", fan_speed_pct=60, heater_power_pct=100)
+        PoultryTelemetry.objects.create(
+            temperature=27.0, humidity=55.0, ammonia_level=4.0,
+            predicted_class=EnvironmentalState.OPTIMAL_ENVIRONMENT,
+        )
+        response = self.client.get(reverse("telemetry-control"))
+        control = response.json()["control"]
+        self.assertEqual(control["effective_fan_pct"], 60)
+        self.assertEqual(control["effective_heater_pct"], 100)
+
     def test_invalid_mode_rejected(self):
         response = self.client.post(
             reverse("telemetry-control"),
