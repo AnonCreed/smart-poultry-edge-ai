@@ -160,10 +160,10 @@ Sensor node (ESP32)  --ESP-NOW-->  Master node (ESP32-S3)  --WiFi/HTTP-->  Djang
 
 ### Master Node Flow (per received packet)
 1. onDataRecv() copies the incoming SensorPacket out of the ESP-NOW payload under a critical section (runs in the WiFi task context).
-2. loop() picks up the fresh packet, appends it to a 3-sample raw history and a 6-row engineered feature window (both must fill before inference starts -- see hardware/esp32s3_master/README.md's warm-up note).
-3. The TFLite Micro interpreter runs one inference producing predicted_temperature, predicted_ammonia, and predicted_spike_probability.
-4. postToDjango() builds the combined JSON record (raw + all three predictions) and POSTs it -- same StaticJsonDocument/HTTPClient pattern the single-board design used.
-5. On HTTP 201, the response's record.predicted_class is parsed and relayed back to the sensor node via esp_now_send() (relayClassificationToSensor()).
+2. loop() folds the fresh sample into a rolling 10-minute accumulation bucket. Once that bucket finalizes, its lag/rolling/delta features are computed against a 7-bucket history (model_runner.cpp) and fed into the TFLite Micro model as a flat 44-feature vector -- **not** a small raw-sample window; the retrained model needs 7 finalized 10-minute buckets (lag6 = 60 min back + the current bucket) before its first inference, i.e. **~70 minutes after boot**, not the ~45 s the earlier windowed model needed. See hardware/esp32s3_master/README.md's "Model architecture" section for the full feature list and why the wait is what it is (the model was trained on 10-minute-resampled data, not the sensor's real 5s cadence).
+3. Once warmed up, the interpreter runs one inference per finalized bucket, producing predicted_temperature and predicted_ammonia (~10 minutes ahead -- this "10 minutes" is the forecast's time horizon, unrelated to the ~70-minute warm-up wait above) plus two spike probabilities (predicted_spike_probability for ammonia, and a temperature-spike probability not yet surfaced to Django/the dashboard).
+4. postToDjango() builds the combined JSON record (raw + predictions, null while still warming up) and POSTs it -- same StaticJsonDocument/HTTPClient pattern the single-board design used.
+5. On HTTP 201, the response's record.predicted_class is parsed and relayed back to the sensor node via esp_now_send().
 6. On any failure (WiFi down, non-201, parse error), nothing is relayed -- the sensor node's actuators simply hold their last commanded state, the same fail-safe behavior the original single-board design had.
 
 ### Payload Inspection
@@ -201,7 +201,7 @@ Example payload (master node, prediction populated):
   "predicted_spike_probability": 0.14
 }
 
-Example payload (master node, before its feature/history warm-up completes -- see hardware/esp32s3_master/README.md):
+Example payload (master node, before its ~70-minute bucket-history warm-up completes -- see hardware/esp32s3_master/README.md's "Model architecture" section):
 {
   "temperature": 30.25,
   "humidity": 62.10,

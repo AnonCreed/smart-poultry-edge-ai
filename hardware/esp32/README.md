@@ -178,9 +178,19 @@ physical reminder while it's active.
 
 The scenario list (`BENCHMARK_SCENARIOS` in `src/main.cpp`) cycles through,
 holding or ramping each for `BENCHMARK_SAMPLES_PER_SCENARIO` samples
-(`config.h`, default 24 * 5 s = 2 minutes -- long enough to clear the
-master's ~9-sample/~45 s model warm-up and still collect several
-predictions once warmed up) before advancing to the next, looping forever:
+(`config.h`, default 24 * 5 s = 2 minutes per scenario). **Note:** this
+2-minute-per-scenario default predates the current model's retrain -- the
+old windowed model warmed up in ~9 samples (~45 s), so 2 minutes was
+generous. The retrained model needs 7 finalized 10-minute buckets
+(~70 minutes after boot, see `hardware/esp32s3_master/README.md`'s "Model
+architecture" section) before it produces its first prediction at all, so
+a full benchmark loop now cycles through several scenarios before any
+prediction appears. Fine for exercising ESP-NOW/classification/actuation
+(none of that depends on warm-up), but if you specifically want to watch
+`predicted_ammonia` lead a live reading during `AMMONIA_RAMP_TO_SPIKE`,
+either let one scenario hold well past 70 minutes (raise
+`BENCHMARK_SAMPLES_PER_SCENARIO` for that run) or just wait out the real
+warm-up once and watch subsequent scenarios normally after that.
 
 | Scenario | Tests |
 |---|---|
