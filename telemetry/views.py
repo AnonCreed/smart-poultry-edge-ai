@@ -372,12 +372,19 @@ def actuator_control(request: HttpRequest) -> JsonResponse:
     # profile, independent of latest_state -- see auto_duty_for_state()'s
     # docstring for why the classification label alone can silently mask a
     # simultaneous cold + critical-ammonia reading.
-    low_temp_c, _heat_stress_temp_c = FlockProfile.current().active_temperature_band()
+    profile = FlockProfile.current()
+    low_temp_c, _heat_stress_temp_c = profile.active_temperature_band()
     latest_is_low_temperature = latest is not None and latest.temperature < low_temp_c
 
     if request.method == "GET":
         return JsonResponse({
             "status": "ok",
+            # Top-level, not nested under "control" -- the ESP32-S3 master's
+            # on-device predictive model takes flock age as an input feature
+            # (see hardware/esp32s3_master/README.md's model-input notes)
+            # and polls this endpoint independently of dashboard actuator
+            # mode, so it needs this regardless of AUTO/MANUAL.
+            "age_weeks": profile.age_weeks,
             "control": control.as_payload(latest_state, latest_predicted_ammonia, latest_is_low_temperature),
         })
 
