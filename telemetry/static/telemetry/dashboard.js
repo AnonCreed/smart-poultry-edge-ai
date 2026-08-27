@@ -575,7 +575,14 @@
   }
 
   function applyProfileToForm(profile) {
-    el.profileAge.value = profile.age_weeks;
+    // The age dropdown only offers discrete Week 1-5 options (Table 4-2 --
+    // week 5 is the open-ended "5+" band, same as every older age), but a
+    // profile saved before that dropdown existed (or one edited directly
+    // in the DB) can carry any positive integer -- clamp to 5 so e.g. a
+    // stored 11 selects "Week 5+" instead of matching no <option> at all
+    // and silently defaulting to the browser's first option (Week 1),
+    // which would misrepresent what's actually active.
+    el.profileAge.value = Math.min(profile.age_weeks, 5);
     el.profileUseCustom.checked = profile.use_custom_thresholds;
     el.profileTempMin.value = profile.custom_temp_min_c ?? "";
     el.profileTempMax.value = profile.custom_temp_max_c ?? "";
@@ -585,6 +592,7 @@
   }
 
   el.profileAge.addEventListener("input", updateAgeBandPreview);
+  el.profileAge.addEventListener("change", updateAgeBandPreview);
   el.profileUseCustom.addEventListener("change", updateCustomFieldVisibility);
 
   el.profileApply.addEventListener("click", async () => {
@@ -628,6 +636,12 @@
      regardless, so AUTO's classifier-derived duty stays visible live even
      though the panel itself isn't submitted. */
 
+  // Most recent /api/telemetry/control/ response's control object, cached
+  // on every poll regardless of mode -- lets switching to AUTO preview its
+  // real effective duty immediately (see setControlModeUI below) without
+  // waiting on a fresh request.
+  let lastControlResponse = null;
+
   function setControlModeUI(mode) {
     selectedControlMode = mode;
     const isAuto = mode === "AUTO";
@@ -635,6 +649,19 @@
     el.controlModeAuto.setAttribute("aria-pressed", String(isAuto));
     el.controlModeManual.classList.toggle("active", !isAuto);
     el.controlModeManual.setAttribute("aria-pressed", String(!isAuto));
+
+    // Switching to AUTO previews the classifier-derived effective duty on
+    // the sliders right away (same "instant local preview" discipline as
+    // the flock age band preview below), instead of leaving them showing
+    // whatever MANUAL setting was last staged until Apply is clicked --
+    // that stale value has nothing to do with what AUTO will actually
+    // drive. The mode itself still isn't sent to the server until Apply.
+    if (isAuto && lastControlResponse) {
+      el.controlFan.value = lastControlResponse.effective_fan_pct;
+      el.controlFanValue.textContent = `${lastControlResponse.effective_fan_pct}%`;
+      el.controlHeater.checked = lastControlResponse.effective_heater_pct > 0;
+      el.controlHeaterValue.textContent = el.controlHeater.checked ? "ON" : "OFF";
+    }
   }
 
   function renderControlEffective(control) {
@@ -645,12 +672,20 @@
 
   function applyControlToForm(control) {
     setControlModeUI(control.mode);
-    el.controlFan.value = control.fan_speed_pct;
-    el.controlFanValue.textContent = `${control.fan_speed_pct}%`;
+    // In AUTO, fan_speed_pct/heater_power_pct are just whatever was last
+    // staged for MANUAL -- stale and unrelated to what's actually running.
+    // Show the classifier-derived effective duty instead, so the slider
+    // reflects reality; in MANUAL, the stored fields ARE the real setting.
+    const isAuto = control.mode === "AUTO";
+    const fanValue = isAuto ? control.effective_fan_pct : control.fan_speed_pct;
+    const heaterOn = isAuto ? control.effective_heater_pct > 0 : control.heater_power_pct > 0;
+
+    el.controlFan.value = fanValue;
+    el.controlFanValue.textContent = `${fanValue}%`;
     // Heater is relay-switched (on/off only, no variable power) -- checkbox,
     // not a percentage.
-    el.controlHeater.checked = control.heater_power_pct > 0;
-    el.controlHeaterValue.textContent = el.controlHeater.checked ? "ON" : "OFF";
+    el.controlHeater.checked = heaterOn;
+    el.controlHeaterValue.textContent = heaterOn ? "ON" : "OFF";
     renderControlEffective(control);
   }
 
@@ -697,6 +732,7 @@
       const response = await fetch(API_CONTROL, { headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = await response.json();
+      lastControlResponse = body.control;
 
       if (!controlFormInitialized) {
         applyControlToForm(body.control);
