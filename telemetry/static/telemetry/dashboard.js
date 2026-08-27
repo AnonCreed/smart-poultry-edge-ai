@@ -55,6 +55,23 @@
   let controlFormInitialized = false;   // Same guard, for the actuator control panel.
   let selectedControlMode = "AUTO";     // Locally-selected mode, committed on Apply.
 
+  // Carries the model's most recent real forecast forward across polls where
+  // the latest record itself has none. The model only produces a fresh
+  // prediction once per ~10-minute bucket (see hardware/esp32s3_master's
+  // README "Model architecture" section) -- on the other ~119 out of 120
+  // five-second polls, latest.predicted_* is null even though a perfectly
+  // good recent forecast exists. Without this, the Overview cards would
+  // read "AI Forecast: pending" almost all the time post-warm-up, which
+  // reads as broken/idle rather than "working, just between updates."
+  // "pending" is reserved for the genuine case: no forecast has ever
+  // arrived yet (fresh boot, still warming up, or the master link is down).
+  let lastForecast = {
+    predicted_temperature: null,
+    predicted_ammonia: null,
+    predicted_spike_probability: null,
+    timestamp: null,
+  };
+
   // CSS custom properties are the single source of truth for series colors.
   const css = getComputedStyle(document.documentElement);
   const COLOR = {
@@ -259,13 +276,13 @@
     return "ok";
   }
 
-  function fmtForecast(value, unit) {
-    // Muted secondary text: numeric when the Edge-AI channel is populated,
-    // "pending" placeholder when the ESP32-S3 link has not yet delivered
-    // a forecast for that point.
-    return (typeof value === "number")
-      ? `AI Forecast: ${value.toFixed(1)} ${unit}`
-      : "AI Forecast: pending";
+  function fmtForecast(value, unit, asOfIso) {
+    // Muted secondary text: numeric (optionally dated, when carried forward
+    // from an earlier bucket -- see lastForecast above) when a forecast
+    // exists at all, "pending" only when none has ever arrived yet.
+    if (typeof value !== "number") return "AI Forecast: pending";
+    const asOf = asOfIso ? ` (as of ${fmtClock(asOfIso)})` : "";
+    return `AI Forecast: ${value.toFixed(1)} ${unit}${asOf}`;
   }
 
   function renderMetrics(latest) {
@@ -274,8 +291,23 @@
     el.valNh3.textContent = latest.ammonia_level.toFixed(1);
     renderAmmoniaRisk(latest.ammonia_level);
 
-    el.fcTemp.textContent = fmtForecast(latest.predicted_temperature, "degC");
-    el.fcNh3.textContent = fmtForecast(latest.predicted_ammonia, "ppm");
+    // The model produces all three prediction fields together (or none) --
+    // a fresh one on this record replaces the carried-forward values;
+    // otherwise the last real forecast keeps being shown/dated instead of
+    // blanking out between bucket ticks.
+    if (typeof latest.predicted_temperature === "number") {
+      lastForecast = {
+        predicted_temperature: latest.predicted_temperature,
+        predicted_ammonia: latest.predicted_ammonia,
+        predicted_spike_probability: latest.predicted_spike_probability,
+        timestamp: latest.timestamp,
+      };
+    }
+    // Only annotate with an "as of" timestamp once it's actually stale
+    // (i.e. carried forward from an earlier record, not this one).
+    const forecastIsFresh = lastForecast.timestamp === latest.timestamp;
+    el.fcTemp.textContent = fmtForecast(lastForecast.predicted_temperature, "degC", forecastIsFresh ? null : lastForecast.timestamp);
+    el.fcNh3.textContent = fmtForecast(lastForecast.predicted_ammonia, "ppm", forecastIsFresh ? null : lastForecast.timestamp);
 
     el.stateBadge.dataset.state = latest.predicted_class;
     el.stateLabel.textContent = BADGE_LABELS[latest.predicted_class] || latest.predicted_class;
@@ -286,7 +318,7 @@
     el.cardHum.dataset.alert  = alertForMetric(latest.predicted_class, "humidity");
     el.cardNh3.dataset.alert  = alertForMetric(latest.predicted_class, "ammonia");
 
-    renderSpikeRisk(latest.predicted_spike_probability);
+    renderSpikeRisk(lastForecast.predicted_spike_probability, forecastIsFresh ? null : lastForecast.timestamp);
   }
 
   /* ---------------------- Ammonia risk / age band lookups ------------------
@@ -324,7 +356,7 @@
    * threshold, so the tile's alert color tracks the same cutoff the
    * firmware and API already agree on rather than a second hardcoded value.
    */
-  function renderSpikeRisk(probability) {
+  function renderSpikeRisk(probability, asOfIso) {
     if (typeof probability !== "number") {
       el.valSpike.textContent = "--.-";
       el.spikeNote.textContent = "Master node: pending";
@@ -333,7 +365,9 @@
     }
 
     el.valSpike.textContent = (probability * 100).toFixed(1);
-    el.spikeNote.textContent = `Threshold: ${(spikeRiskThreshold * 100).toFixed(0)}%`;
+    el.spikeNote.textContent = asOfIso
+      ? `Threshold: ${(spikeRiskThreshold * 100).toFixed(0)}% (as of ${fmtClock(asOfIso)})`
+      : `Threshold: ${(spikeRiskThreshold * 100).toFixed(0)}%`;
 
     if (probability >= spikeRiskThreshold * 2) {
       el.cardSpike.dataset.alert = "crit";
