@@ -285,23 +285,31 @@
     return `AI Forecast: ${value.toFixed(1)} ${unit}${asOf}`;
   }
 
-  function renderMetrics(latest) {
+  function renderMetrics(latest, points) {
     el.valTemp.textContent = latest.temperature.toFixed(1);
     el.valHum.textContent = latest.humidity.toFixed(1);
     el.valNh3.textContent = latest.ammonia_level.toFixed(1);
     renderAmmoniaRisk(latest.ammonia_level);
 
-    // The model produces all three prediction fields together (or none) --
-    // a fresh one on this record replaces the carried-forward values;
-    // otherwise the last real forecast keeps being shown/dated instead of
-    // blanking out between bucket ticks.
-    if (typeof latest.predicted_temperature === "number") {
-      lastForecast = {
-        predicted_temperature: latest.predicted_temperature,
-        predicted_ammonia: latest.predicted_ammonia,
-        predicted_spike_probability: latest.predicted_spike_probability,
-        timestamp: latest.timestamp,
-      };
+    // The model produces all three prediction fields together (or none).
+    // Scan the whole fetched window (not just watch live ticks) for the
+    // most recent one with a real forecast -- a live tick alone would miss
+    // a forecast that already existed in history before this page loaded
+    // (e.g. a fresh page load/refresh landing between two ~10-minute
+    // bucket ticks), leaving lastForecast stuck at its just-booted empty
+    // state and showing "pending" despite predictions already on record.
+    if (Array.isArray(points)) {
+      for (let i = points.length - 1; i >= 0; i--) {
+        if (typeof points[i].predicted_temperature === "number") {
+          lastForecast = {
+            predicted_temperature: points[i].predicted_temperature,
+            predicted_ammonia: points[i].predicted_ammonia,
+            predicted_spike_probability: points[i].predicted_spike_probability,
+            timestamp: points[i].timestamp,
+          };
+          break;
+        }
+      }
     }
     // Only annotate with an "as of" timestamp once it's actually stale
     // (i.e. carried forward from an earlier record, not this one).
@@ -959,7 +967,7 @@
       renderCharts(allChartPoints, allChartThresholds);
       appendConsoleLines(body.data);
       if (body.data.length > 0) {
-        renderMetrics(body.data[body.data.length - 1]);
+        renderMetrics(body.data[body.data.length - 1], body.data);
       }
     } catch (err) {
       setLinkState("offline", "Link down");
