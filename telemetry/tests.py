@@ -20,14 +20,38 @@ class ClassifierRuleTests(TestCase):
             EnvironmentalState.CRITICAL_AMMONIA,
         )
 
-    def test_heat_stress_requires_conjunction(self):
+    def test_heat_stress_triggers_on_temperature_alone(self):
+        # Humidity no longer gates this -- a hot reading is dangerous by
+        # itself (chicks' thermoregulation doesn't get the benefit of the
+        # doubt humidity's evaporative-cooling-suppression effect implied).
+        # Low humidity used deliberately here to prove it isn't a factor.
         self.assertEqual(
-            classify_environment(temperature=36.0, humidity=71.0, ammonia_level=10.0),
+            classify_environment(temperature=36.0, humidity=30.0, ammonia_level=10.0),
             EnvironmentalState.HEAT_STRESS_WARNING,
         )
-        # High temperature alone with low humidity does not trigger the warning.
         self.assertEqual(
-            classify_environment(temperature=36.0, humidity=50.0, ammonia_level=10.0),
+            classify_environment(temperature=36.0, humidity=90.0, ammonia_level=10.0),
+            EnvironmentalState.HEAT_STRESS_WARNING,
+        )
+
+    def test_heat_stress_triggers_from_forecast_before_live_reading_crosses(self):
+        # The live reading alone (34.0) is still under the 35.0 threshold --
+        # only the forecast (36.0) has crossed it. Should still flag now,
+        # not wait for the live reading to catch up.
+        self.assertEqual(
+            classify_environment(
+                temperature=34.0, humidity=50.0, ammonia_level=3.0,
+                predicted_temperature=36.0,
+            ),
+            EnvironmentalState.HEAT_STRESS_WARNING,
+        )
+
+    def test_heat_stress_forecast_below_threshold_does_not_trigger(self):
+        self.assertEqual(
+            classify_environment(
+                temperature=27.0, humidity=50.0, ammonia_level=3.0,
+                predicted_temperature=30.0,
+            ),
             EnvironmentalState.OPTIMAL_ENVIRONMENT,
         )
 

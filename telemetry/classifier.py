@@ -12,10 +12,20 @@ Rule precedence (first match wins):
    where Table 4-1's risk scale (AMMONIA_RISK_LEVELS below) starts labeling
    readings "High risk" -- the reactive cutoff and that display band now
    start at the same value, deliberately.
-2. Combined heat + humidity load (T > 35.0 AND RH > 70.0) yields
-   HEAT_STRESS_WARNING; high humidity suppresses evaporative cooling, so
-   the two conditions are only dangerous in conjunction.
-3. Hypothermia risk: temperature < 18.0 yields LOW_TEMP_ALERT.
+2. Heat stress: temperature alone crossing the active max threshold (the
+   age-band's ceiling -- see AGE_TEMPERATURE_BANDS_C) is HEAT_STRESS_WARNING
+   on its own, no humidity condition required. Chicks' thermoregulation is
+   fragile enough -- especially in the first couple of weeks -- that
+   humidity's evaporative-cooling-suppression effect isn't treated as a
+   prerequisite the way it might be for mature birds; a hot reading is
+   dangerous by itself. This also triggers from the Edge-AI forecast alone
+   (predicted_temperature crossing the same threshold), not just the live
+   reading -- catching a predicted rise before it arrives matters more than
+   waiting for it to happen, the same reasoning the ammonia spike-risk
+   forecast already uses as an early-warning signal.
+3. Hypothermia risk: temperature < 18.0 yields LOW_TEMP_ALERT. Live-only,
+   deliberately not extended to the forecast the way heat-stress above is --
+   nothing about this session's changes asked for a predictive cold trigger.
 4. Fallback: OPTIMAL_ENVIRONMENT.
 """
 
@@ -25,7 +35,6 @@ from .models import EnvironmentalState
 # active thresholds to the front end without duplicating magic numbers.
 AMMONIA_CRITICAL_PPM = 15.0
 HEAT_STRESS_TEMP_C = 35.0
-HEAT_STRESS_HUMIDITY_PCT = 70.0
 LOW_TEMP_C = 18.0
 
 # Decision threshold for the ESP32-S3 master node's TFLite Micro spike
@@ -90,6 +99,7 @@ def classify_environment(
     temp_min_c: float | None = None,
     temp_max_c: float | None = None,
     ammonia_critical_ppm: float | None = None,
+    predicted_temperature: float | None = None,
 ) -> str:
     """Map a raw sensor triplet to a classification label. Pure and stateless.
 
@@ -97,6 +107,17 @@ def classify_environment(
     a flock profile's age-derived band or custom thresholds reach
     classification. Omitted (the default), thresholds fall back to the fixed
     module constants exactly as before, so existing callers are unaffected.
+
+    predicted_temperature (the Edge-AI forecast, when available) is checked
+    against the same heat-stress threshold as the live reading -- a
+    deliberate exception to "forecasts are advisory and never alter
+    classification" for this one rule specifically, since catching a
+    predicted heat crossing before it happens is the whole point of having
+    an on-device forecast at all. Omitted (the default), only the live
+    reading is checked, same as before this parameter existed. `humidity`
+    is accepted for call-site/back-compat consistency with the other two
+    raw readings but no longer participates in the heat-stress decision --
+    see the module docstring's rule 2 for why.
     """
     low_temp_c = temp_min_c if temp_min_c is not None else LOW_TEMP_C
     heat_stress_temp_c = temp_max_c if temp_max_c is not None else HEAT_STRESS_TEMP_C
@@ -105,7 +126,9 @@ def classify_environment(
     if ammonia_level > critical_ppm:
         return EnvironmentalState.CRITICAL_AMMONIA
 
-    if temperature > heat_stress_temp_c and humidity > HEAT_STRESS_HUMIDITY_PCT:
+    live_heat_stress = temperature > heat_stress_temp_c
+    forecast_heat_stress = predicted_temperature is not None and predicted_temperature > heat_stress_temp_c
+    if live_heat_stress or forecast_heat_stress:
         return EnvironmentalState.HEAT_STRESS_WARNING
 
     if temperature < low_temp_c:

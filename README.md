@@ -54,7 +54,7 @@ they can talk to each other.
 ## Classifier rules (first match wins)
 
 1. `ammonia_level > 15.0` -> `CRITICAL_AMMONIA` (dark red background, white text)
-2. `temperature > 35.0 AND humidity > 70.0` -> `HEAT_STRESS_WARNING` (orange border, orange text)
+2. `temperature > 35.0` (live reading OR the Edge-AI forecast alone) -> `HEAT_STRESS_WARNING` (orange border, orange text) -- no humidity condition
 3. `temperature < 18.0` -> `LOW_TEMP_ALERT` (deep blue text, light blue accents)
 4. otherwise -> `OPTIMAL_ENVIRONMENT` (charcoal grid, solid green indicator dot)
 
@@ -136,10 +136,10 @@ fan engages and extracts it back to baseline.
 python manage.py test telemetry
 ```
 
-Covers classifier rule precedence (ammonia dominance, heat-stress conjunction,
-low-temperature boundary), ingestion validation, nullable forecast-channel
-contracts (absent key, explicit null, populated, invalid type), and historical
-ordering/threshold contracts.
+Covers classifier rule precedence (ammonia dominance, heat-stress from live
+reading or forecast alone, low-temperature boundary), ingestion validation,
+nullable forecast-channel contracts (absent key, explicit null, populated,
+invalid type), and historical ordering/threshold contracts.
 
 ## Hardware firmware (two boards: ESP32 sensor node + ESP32-S3 master node)
 

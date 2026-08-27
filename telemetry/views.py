@@ -141,11 +141,15 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
             )
         predictions["predicted_spike_probability"] = spike_value
 
-    # Classification remains driven exclusively by live sensor readings;
-    # forecasts are advisory overlays and never alter the stored state. The
-    # flock profile's active thresholds default to the classifier's own
-    # fixed constants until a user has explicitly saved an age/custom
-    # profile, so ingestion behavior is unchanged out of the box.
+    # Classification is driven by live sensor readings, with one deliberate
+    # exception: the Edge-AI forecast can also trigger HEAT_STRESS_WARNING
+    # on its own, ahead of the live reading actually crossing the threshold
+    # -- see classify_environment()'s docstring for why heat-stress specifically
+    # gets this treatment. Every other rule (ammonia, cold) stays live-only;
+    # forecasts remain purely advisory for those. The flock profile's active
+    # thresholds default to the classifier's own fixed constants until a
+    # user has explicitly saved an age/custom profile, so ingestion behavior
+    # is unchanged out of the box.
     profile = FlockProfile.current()
     low_temp_c, heat_stress_temp_c = profile.active_temperature_band()
     predicted = classifier.classify_environment(
@@ -155,6 +159,7 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
         temp_min_c=low_temp_c,
         temp_max_c=heat_stress_temp_c,
         ammonia_critical_ppm=profile.active_ammonia_critical_ppm(),
+        predicted_temperature=predictions.get("predicted_temperature"),
     )
 
     # Raw temperature-vs-threshold check, independent of `predicted` above.
@@ -267,7 +272,6 @@ def historical_telemetry(request: HttpRequest) -> JsonResponse:
             "thresholds": {
                 "ammonia_critical_ppm": profile.active_ammonia_critical_ppm(),
                 "heat_stress_temp_c": active_heat_stress_temp_c,
-                "heat_stress_humidity_pct": classifier.HEAT_STRESS_HUMIDITY_PCT,
                 "low_temp_c": active_low_temp_c,
                 "ammonia_spike_risk_threshold": classifier.AMMONIA_SPIKE_RISK_THRESHOLD,
                 # Static reference tables, echoed once per poll so the

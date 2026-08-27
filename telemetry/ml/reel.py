@@ -104,6 +104,7 @@ def build_demo_reel() -> dict:
                 temperature, humidity, ammonia,
                 temp_min_c=low_temp_c, temp_max_c=heat_stress_temp_c,
                 ammonia_critical_ppm=ammonia_critical_ppm,
+                predicted_temperature=forecast["predicted_temperature"],
             )
             is_low_temperature = temperature < low_temp_c
 

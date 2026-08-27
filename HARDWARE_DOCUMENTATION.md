@@ -507,7 +507,7 @@ Forecasting and classification no longer happen on this board at all -- see the 
 
 ### Additional Defense Notes for Viva
 - Classification precedence is intentionally ammonia-dominant:
-  - Backend classifier evaluates ammonia > 15.0 first, then heat+humidity conjunction, then low temperature. The master node's spike-risk prediction is a separate, advisory-only signal (predicted_spike_probability) and never itself changes this precedence or the resulting predicted_class.
+  - Backend classifier evaluates ammonia > 15.0 first, then heat stress (temperature alone crossing the age-band ceiling -- humidity is no longer a condition -- triggered by either the live reading or the Edge-AI forecast), then low temperature. The master node's spike-risk prediction is a separate, advisory-only signal (predicted_spike_probability) and never itself changes this precedence or the resulting predicted_class; the Edge-AI temperature forecast is the one deliberate exception to "forecasts are advisory-only," since it can trigger HEAT_STRESS_WARNING on its own ahead of the live reading (see telemetry/classifier.py's docstring).
 - Firmware and backend state vocabularies are byte-aligned:
   - STATE_* constants in the sensor node's firmware, and the classification strings the master node relays, must remain identical to backend EnvironmentalState values.
 - ESP-NOW packet structs must stay byte-identical across both boards:
