@@ -23,14 +23,11 @@
 // this board guaranteed that by joining the same AP as the master and
 // letting the router assign the channel to both; without an AP join, the
 // channel has to be fixed at compile time instead:
-#define ESPNOW_WIFI_CHANNEL 11
+#define ESPNOW_WIFI_CHANNEL 1
 // ^ Must match whatever channel the ESP32-S3 master's WiFi actually lands
 // on -- check the master's boot log line "[WIFI] Connected. IP=... Channel=N
-// ...". Updated 2026-08-26 to 11 for the "samjhana777_2" network (this
-// router's 2.4GHz band -- the ESP32/ESP32-S3 radios can't join a 5GHz-only
-// SSID like this router's "samjhana777_5" at all, so make sure the master's
-// credentials.h points at the _2 network, not _5). Routers with
-// auto-channel-select can still change this later (e.g. after a reboot or
+// ...". Updated 2026-08-27 to 1 for the "amir123" network. Routers with
+// auto-channel-select can change this later (e.g. after a reboot or
 // interference-driven reshuffle) -- if ESP-NOW packets silently stop
 // arriving at the master despite this board's [TX] lines looking normal,
 // check the master's actual channel first. The master logs a boot-time
