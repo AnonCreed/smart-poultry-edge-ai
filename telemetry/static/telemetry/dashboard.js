@@ -386,30 +386,54 @@
     }
   }
 
-  function renderCharts(points, thresholds) {
-    const nullSafe = (v) => (typeof v === "number" ? v : null);
-
-    // Determine visible slice based on window size and pan offset.
-    let slice;
-    if (chartWindowSize === 0 || points.length <= chartWindowSize) {
-      slice = points;
-    } else {
-      const end = points.length - chartOffset;
-      const start = Math.max(0, end - chartWindowSize);
-      slice = points.slice(start, end);
+  /**
+   * Forward-fills a nullable series: each null becomes the last non-null
+   * value seen so far (nulls before the first real value stay null -- that
+   * gap is genuine, before any forecast has ever existed). The model only
+   * produces a fresh prediction once per ~10-minute bucket while points
+   * arrive every 5s, so a raw per-point series is null on ~119 out of every
+   * 120 points -- with spanGaps:false those render as an all-but-invisible
+   * scatter of single dots, never a visible line, even though a perfectly
+   * good forecast exists the whole time between updates. Filled over the
+   * FULL series before windowing/slicing (not per-slice) so a zoomed-in
+   * chart window still shows a real held value from before that window
+   * started, not a leading gap.
+   */
+  function forwardFill(values) {
+    const filled = new Array(values.length);
+    let last = null;
+    for (let i = 0; i < values.length; i++) {
+      if (typeof values[i] === "number") last = values[i];
+      filled[i] = last;
     }
+    return filled;
+  }
+
+  function renderCharts(points, thresholds) {
+    const filledPredTemp = forwardFill(points.map((p) => p.predicted_temperature));
+    const filledPredNh3  = forwardFill(points.map((p) => p.predicted_ammonia));
+
+    // Determine visible slice based on window size and pan offset -- same
+    // index range applied to the filled forecast arrays below so they stay
+    // aligned with the live-sensor series and labels.
+    let start = 0, end = points.length;
+    if (chartWindowSize !== 0 && points.length > chartWindowSize) {
+      end = points.length - chartOffset;
+      start = Math.max(0, end - chartWindowSize);
+    }
+    const slice = points.slice(start, end);
 
     const labels = slice.map((p) => fmtClock(p.timestamp));
 
     tempChart.data.labels = labels;
     tempChart.data.datasets[0].data = slice.map((p) => p.temperature);
-    tempChart.data.datasets[1].data = slice.map((p) => nullSafe(p.predicted_temperature));
+    tempChart.data.datasets[1].data = filledPredTemp.slice(start, end);
     tempChart.data.datasets[2].data = slice.map(() => thresholds.heat_stress_temp_c);
     tempChart.update();
 
     ammoniaChart.data.labels = labels;
     ammoniaChart.data.datasets[0].data = slice.map((p) => p.ammonia_level);
-    ammoniaChart.data.datasets[1].data = slice.map((p) => nullSafe(p.predicted_ammonia));
+    ammoniaChart.data.datasets[1].data = filledPredNh3.slice(start, end);
     ammoniaChart.data.datasets[2].data = slice.map(() => thresholds.ammonia_critical_ppm);
     ammoniaChart.update();
 

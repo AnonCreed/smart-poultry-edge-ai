@@ -531,11 +531,6 @@
     </div>
   </div>
 
-  <footer class="container-fluid text-muted small py-3 border-top mt-3">
-    <span class="font-monospace">GET /api/telemetry/historical/?hours=N &middot; POST /api/telemetry/submit/</span>
-    <span class="ms-2">Refresh cadence 5 s &middot; Forecast channels nullable until ESP32-S3 link is active</span>
-  </footer>
-
   <!-- Bootstrap's JS bundle (includes Popper) drives the tab component above. -->
   <script src="{% static 'telemetry/vendor/bootstrap.bundle.min.js' %}"></script>
   <script src="{% static 'telemetry/dashboard.js' %}?v={{ dashboard_js_version }}"></script>
