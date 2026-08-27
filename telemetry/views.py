@@ -15,8 +15,10 @@ Endpoints:
 import csv
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 
+from django.contrib.staticfiles import finders
 from django.db.models import Avg, Count, Max, Min
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
@@ -588,5 +590,21 @@ def test_case_reel(request: HttpRequest) -> JsonResponse:
 
 
 def dashboard(request: HttpRequest):
-    """Serve the analytical dashboard shell. All data arrives via the JSON API."""
-    return render(request, "telemetry/dashboard.html")
+    """Serve the analytical dashboard shell. All data arrives via the JSON API.
+
+    dashboard_js_version is dashboard.js's own mtime, appended as a
+    cache-busting ?v= query string in the template -- this file gets edited
+    often during development, and the plain {% static %} URL never changes,
+    so a browser (or an intermediate proxy) that already cached an old copy
+    keeps serving it indefinitely with no visible sign anything is stale.
+    A real incident this caused: a bug fix landed and was verified correct
+    server-side (confirmed serving the updated file, confirmed the API
+    returning the right data) while a browser tab kept rendering the old
+    broken behavior regardless of a manual refresh, because the cached
+    script was still the one actually executing. Deriving the version from
+    mtime means every edit automatically busts the cache with no manual
+    version bump to remember.
+    """
+    js_path = finders.find("telemetry/dashboard.js")
+    js_version = int(os.path.getmtime(js_path)) if js_path else 0
+    return render(request, "telemetry/dashboard.html", {"dashboard_js_version": js_version})

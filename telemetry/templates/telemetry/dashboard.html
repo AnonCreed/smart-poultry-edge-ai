@@ -538,6 +538,6 @@
 
   <!-- Bootstrap's JS bundle (includes Popper) drives the tab component above. -->
   <script src="{% static 'telemetry/vendor/bootstrap.bundle.min.js' %}"></script>
-  <script src="{% static 'telemetry/dashboard.js' %}"></script>
+  <script src="{% static 'telemetry/dashboard.js' %}?v={{ dashboard_js_version }}"></script>
 </body>
 </html>
