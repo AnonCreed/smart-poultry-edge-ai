@@ -85,7 +85,7 @@
 
   function renderNextPredictionCountdown() {
     if (nextPredictionTargetMs === null) {
-      el.aiNextUpdate.textContent = "Next AI update: pending";
+      el.aiNextUpdate.textContent = "Next update: pending";
       return;
     }
     const remainingMs = nextPredictionTargetMs - Date.now();
@@ -94,13 +94,13 @@
       // fresh countdown once the bucket it's currently on actually
       // finalizes -- this just covers the brief window between "our local
       // clock thinks time's up" and "the next real record confirms it".
-      el.aiNextUpdate.textContent = "Next AI update: due any moment";
+      el.aiNextUpdate.textContent = "Next update: due any moment";
       return;
     }
     const totalSeconds = Math.floor(remainingMs / 1000);
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
-    el.aiNextUpdate.textContent = `Next AI update: ${minutes}m ${String(seconds).padStart(2, "0")}s`;
+    el.aiNextUpdate.textContent = `Next update: ${minutes}m ${String(seconds).padStart(2, "0")}s`;
   }
 
   // CSS custom properties are the single source of truth for series colors.
@@ -1138,7 +1138,7 @@
 
   refresh();
   setInterval(refresh, POLL_INTERVAL_MS);
-  // Independent 1 s ticker so the "Next AI update" countdown moves smoothly
+  // Independent 1 s ticker so the "Next update" countdown moves smoothly
   // between 5 s polls instead of visibly jumping in 5 s steps -- purely
   // cosmetic local ticking; nextPredictionTargetMs itself only ever moves
   // when a real poll re-derives it from the firmware's latest report.
