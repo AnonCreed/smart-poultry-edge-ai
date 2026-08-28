@@ -72,4 +72,17 @@ bool init();
 // reaches 60 minutes back, plus the current bucket itself).
 bool predict(const RawSample& sample, uint8_t flockAgeWeeks, ModelPrediction& out);
 
+// Seconds until the next prediction becomes available -- whichever comes
+// next, the very first one (still accumulating toward 7 finalized buckets,
+// ~70 min after boot) or the next steady-state refresh once warmed up (a
+// fresh inference every ~10 minutes thereafter). Both cases are really the
+// same question -- "how much of the current bucket, plus how many more full
+// buckets, stand between now and the next finalized bucket that satisfies
+// the 7-bucket history" -- so one formula covers both without the caller
+// needing to know which phase it's in. Purely informational: read by
+// main.cpp to report progress to Django/the dashboard, never consumed by
+// predict() itself. Returns 0 if called before the first predict() call has
+// started the first bucket.
+uint32_t secondsUntilNextPrediction();
+
 }  // namespace model_runner

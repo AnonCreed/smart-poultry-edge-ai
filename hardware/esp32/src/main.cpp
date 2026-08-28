@@ -38,6 +38,7 @@
 #include <WiFi.h>
 #include <esp_wifi.h>  // esp_wifi_set_channel() -- fixed-channel ESP-NOW, no AP join
 #include <esp_now.h>
+#include <esp_system.h>  // esp_reset_reason() -- see logResetReason() below
 #include <DHT.h>
 #include <math.h>
 #include <Wire.h>
@@ -434,6 +435,37 @@ static void applyActuators(uint8_t fan_pwm, uint8_t heater_pwm) {
     ledcWrite(PWM_FAN_CHANNEL, fan_pwm);
 }
 
+/**
+ * Logs WHY this boot happened -- genuine power-on, or a recovery from
+ * brownout/watchdog/panic/software reset. Identical in purpose and
+ * implementation to the master node's logResetReason() (main.cpp there),
+ * added there first when this board was still USB-powered on a desk and
+ * silent reboots were hard to tell apart from "just slow." Added here now
+ * that this board is moving to its own external power supply, off the
+ * desk and out of easy reach of a replug -- a brownout on a marginal
+ * supply is now the single most likely failure mode worth being able to
+ * see after the fact, and this is the cheap, permanent way to see it
+ * rather than re-guess it blind the way the master's warm-up mystery
+ * had to be debugged earlier.
+ */
+static void logResetReason() {
+    const char* reason;
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   reason = "POWERON (genuine cold boot / power applied)"; break;
+        case ESP_RST_EXT:       reason = "EXT (external reset pin)"; break;
+        case ESP_RST_SW:        reason = "SW (software-triggered reset)"; break;
+        case ESP_RST_PANIC:     reason = "PANIC (crash)"; break;
+        case ESP_RST_INT_WDT:   reason = "INT_WDT (interrupt watchdog)"; break;
+        case ESP_RST_TASK_WDT:  reason = "TASK_WDT (task watchdog)"; break;
+        case ESP_RST_WDT:       reason = "WDT (other watchdog)"; break;
+        case ESP_RST_BROWNOUT:  reason = "BROWNOUT (power sagged below threshold)"; break;
+        case ESP_RST_SDIO:      reason = "SDIO"; break;
+        case ESP_RST_DEEPSLEEP: reason = "DEEPSLEEP wake"; break;
+        default:                reason = "UNKNOWN"; break;
+    }
+    Serial.printf("[BOOT] Reset reason: %s\n", reason);
+}
+
 // ============================================================================
 // Arduino entrypoints
 // ============================================================================
@@ -441,6 +473,7 @@ void setup() {
     Serial.begin(115200);
     delay(50);
     Serial.println("\n[BOOT] Poultry Telemetry sensor node starting.");
+    logResetReason();
 #ifdef BENCHMARK_MODE
     Serial.println("[BOOT] *** BENCHMARK MODE -- synthetic scripted sensor data, NOT real readings ***");
 #endif

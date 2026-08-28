@@ -357,8 +357,14 @@ static bool postToDjango(const SensorPacket& pkt, const ModelPrediction* pred, c
         doc["predicted_ammonia"]          = nullptr;
         doc["predicted_spike_probability"] = nullptr;
     }
+    // Countdown to the next prediction -- first-ever (still warming up) or
+    // next steady-state refresh, model_runner::secondsUntilNextPrediction()
+    // covers both. Purely informational: Django stores it alongside this
+    // record and the dashboard renders a live "next AI update in ..."
+    // countdown from it, so the warm-up wait isn't a silent black box.
+    doc["model_seconds_to_next"] = model_runner::secondsUntilNextPrediction();
 
-    char body[256];
+    char body[300];
     serializeJson(doc, body, sizeof(body));
 
     HTTPClient http;

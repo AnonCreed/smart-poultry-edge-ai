@@ -167,6 +167,39 @@ class SubmitEndpointTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(PoultryTelemetry.objects.count(), 0)
 
+    def test_model_seconds_to_next_defaults_to_null_when_absent(self):
+        # Master node not yet linked (or a firmware build predating this
+        # field): key omitted entirely.
+        response = self._post({"temperature": 27.0, "humidity": 60.0, "ammonia_level": 5.0})
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(PoultryTelemetry.objects.get().model_seconds_to_next)
+        self.assertIsNone(response.json()["record"]["model_seconds_to_next"])
+
+    def test_model_seconds_to_next_persists_when_provided(self):
+        response = self._post({
+            "temperature": 27.0, "humidity": 60.0, "ammonia_level": 5.0,
+            "model_seconds_to_next": 4123,
+        })
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(PoultryTelemetry.objects.get().model_seconds_to_next, 4123)
+        self.assertEqual(response.json()["record"]["model_seconds_to_next"], 4123)
+
+    def test_model_seconds_to_next_negative_rejected(self):
+        response = self._post({
+            "temperature": 27.0, "humidity": 60.0, "ammonia_level": 5.0,
+            "model_seconds_to_next": -1,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(PoultryTelemetry.objects.count(), 0)
+
+    def test_non_numeric_model_seconds_to_next_rejected(self):
+        response = self._post({
+            "temperature": 27.0, "humidity": 60.0, "ammonia_level": 5.0,
+            "model_seconds_to_next": "soon",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(PoultryTelemetry.objects.count(), 0)
+
 
 class HistoricalEndpointTests(TestCase):
     def test_returns_ascending_chronology_and_thresholds(self):

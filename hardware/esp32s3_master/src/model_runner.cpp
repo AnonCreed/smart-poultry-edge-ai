@@ -343,4 +343,27 @@ bool predict(const RawSample& sample, uint8_t flockAgeWeeks, ModelPrediction& ou
     return readPrediction(out);
 }
 
+uint32_t secondsUntilNextPrediction() {
+    if (!g_bucketStarted) {
+        return 0;  // predict() hasn't run yet at all
+    }
+
+    const unsigned long now = millis();
+    const unsigned long elapsedInCurrentBucketMs = now - g_bucketStartMs;
+
+    // How many buckets still need to finalize, beyond the one currently
+    // filling, before the 7-bucket history is satisfied. 0 once warmed up
+    // (g_bucketCount == kBucketHistoryLen already) -- in that case only the
+    // "time left in the current bucket" term below matters, which is
+    // exactly the steady-state "next refresh" answer.
+    const int bucketsNeeded = kBucketHistoryLen - g_bucketCount;
+    const long fullBucketsRemaining = bucketsNeeded > 1 ? bucketsNeeded - 1 : 0;
+
+    const long remainingMs =
+        fullBucketsRemaining * static_cast<long>(kBucketDurationMs)
+        + (static_cast<long>(kBucketDurationMs) - static_cast<long>(elapsedInCurrentBucketMs));
+
+    return remainingMs > 0 ? static_cast<uint32_t>(remainingMs / 1000UL) : 0;
+}
+
 }  // namespace model_runner

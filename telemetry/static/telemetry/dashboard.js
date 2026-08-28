@@ -72,6 +72,37 @@
     timestamp: null,
   };
 
+  // Countdown to the master's next prediction (model_seconds_to_next on the
+  // latest record -- see model_runner::secondsUntilNextPrediction() on the
+  // firmware side). Stored as an absolute wall-clock target, not a raw
+  // seconds count, so a once-per-second local ticker (below) can count it
+  // down smoothly between the 5 s polls that actually refresh it -- every
+  // fresh poll re-derives this from the firmware's own freshly-reported
+  // value, so it self-corrects rather than drifting. null whenever the
+  // master hasn't reported one yet (not linked, or a firmware build that
+  // predates this field).
+  let nextPredictionTargetMs = null;
+
+  function renderNextPredictionCountdown() {
+    if (nextPredictionTargetMs === null) {
+      el.aiNextUpdate.textContent = "Next AI update: pending";
+      return;
+    }
+    const remainingMs = nextPredictionTargetMs - Date.now();
+    if (remainingMs <= 0) {
+      // The firmware's own next poll (every 5s, same as ours) will report a
+      // fresh countdown once the bucket it's currently on actually
+      // finalizes -- this just covers the brief window between "our local
+      // clock thinks time's up" and "the next real record confirms it".
+      el.aiNextUpdate.textContent = "Next AI update: due any moment";
+      return;
+    }
+    const totalSeconds = Math.floor(remainingMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    el.aiNextUpdate.textContent = `Next AI update: ${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+
   // CSS custom properties are the single source of truth for series colors.
   const css = getComputedStyle(document.documentElement);
   const COLOR = {
@@ -104,6 +135,7 @@
     stateBadge: document.getElementById("state-badge"),
     stateLabel: document.getElementById("state-label"),
     stateTime:  document.getElementById("state-time"),
+    aiNextUpdate: document.getElementById("ai-next-update"),
     consoleFeed:  document.getElementById("console-feed"),
     consoleCount: document.getElementById("console-count"),
     consolePause: document.getElementById("console-pause"),
@@ -327,6 +359,16 @@
     el.cardNh3.dataset.alert  = alertForMetric(latest.predicted_class, "ammonia");
 
     renderSpikeRisk(lastForecast.predicted_spike_probability, forecastIsFresh ? null : lastForecast.timestamp);
+
+    // Re-derive the countdown target from this record's own freshly-reported
+    // value every poll (not just once) -- keeps it self-correcting against
+    // the firmware's real bucket timer instead of drifting off a stale
+    // local guess, and naturally jumps back up to ~10 min right after a
+    // bucket actually finalizes.
+    nextPredictionTargetMs = typeof latest.model_seconds_to_next === "number"
+      ? Date.now() + latest.model_seconds_to_next * 1000
+      : null;
+    renderNextPredictionCountdown();
   }
 
   /* ---------------------- Ammonia risk / age band lookups ------------------
@@ -1096,4 +1138,9 @@
 
   refresh();
   setInterval(refresh, POLL_INTERVAL_MS);
+  // Independent 1 s ticker so the "Next AI update" countdown moves smoothly
+  // between 5 s polls instead of visibly jumping in 5 s steps -- purely
+  // cosmetic local ticking; nextPredictionTargetMs itself only ever moves
+  // when a real poll re-derives it from the firmware's latest report.
+  setInterval(renderNextPredictionCountdown, 1000);
 })();

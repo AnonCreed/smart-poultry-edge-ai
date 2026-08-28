@@ -78,6 +78,25 @@ class PoultryTelemetry(models.Model):
         help_text="Server-computed environmental classification at ingestion time.",
     )
 
+    # Countdown, not a reading: how many seconds the master's on-device model
+    # reported (at transmission time) until its next prediction -- the very
+    # first one during the ~70-minute warm-up, or the next steady-state
+    # refresh once warmed up. Nullable for the same reason the forecast
+    # channels above are: absent whenever the ESP32-S3 master isn't linked,
+    # or (in principle) if a future master firmware build predates this
+    # field. Not itself a forecast value, so it's kept out of the
+    # "Edge-AI forecast channels" block above.
+    model_seconds_to_next = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Seconds until the master node's on-device model produces its next "
+            "prediction, as reported by the master at transmission time. Covers "
+            "both the initial ~70-minute warm-up and every ~10-minute refresh "
+            "after. Null until the ESP32-S3 master is linked."
+        ),
+    )
+
     class Meta:
         ordering = ["-timestamp"]
         verbose_name = "Poultry telemetry record"
@@ -113,6 +132,7 @@ class PoultryTelemetry(models.Model):
                 if self.predicted_spike_probability is not None else None
             ),
             "predicted_class": self.predicted_class,
+            "model_seconds_to_next": self.model_seconds_to_next,
         }
 
 

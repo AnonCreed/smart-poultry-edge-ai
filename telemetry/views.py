@@ -57,6 +57,13 @@ OPTIONAL_PREDICTION_BOUNDS = {
 # bounds are the unit interval rather than a physical sensor envelope.
 SPIKE_PROBABILITY_BOUNDS = (0.0, 1.0)
 
+# Countdown to the model's next prediction, reported by the master at
+# transmission time (model_runner::secondsUntilNextPrediction() -- covers
+# both the ~70-minute warm-up and every ~10-minute refresh after). Generous
+# upper bound (1 day) is just a garbage-value backstop, not a real ceiling --
+# the real max is the ~70-minute cold-start case.
+MODEL_SECONDS_TO_NEXT_BOUNDS = (0, 24 * 60 * 60)
+
 DEFAULT_WINDOW_HOURS = 24
 MAX_WINDOW_HOURS = 24 * 30  # Hard cap to bound query cost on large tables
 
@@ -140,6 +147,30 @@ def submit_telemetry(request: HttpRequest) -> JsonResponse:
                 f"[{lower}, {upper}]. Reading rejected."
             )
         predictions["predicted_spike_probability"] = spike_value
+
+    # Countdown to the model's next prediction -- same absent-key ==
+    # explicit-null == "master not linked yet" contract as the channels
+    # above, but an integer count of seconds rather than a forecast value,
+    # so it gets its own bespoke block instead of joining
+    # OPTIONAL_PREDICTION_BOUNDS (which assumes a shared physical envelope
+    # with a live counterpart -- this field has none).
+    raw_seconds_to_next = payload.get("model_seconds_to_next")
+    if raw_seconds_to_next is None:
+        predictions["model_seconds_to_next"] = None
+    elif isinstance(raw_seconds_to_next, bool) or not isinstance(raw_seconds_to_next, (int, float)):
+        return _error(
+            f"Field 'model_seconds_to_next' must be numeric or null, "
+            f"got {type(raw_seconds_to_next).__name__}."
+        )
+    else:
+        seconds_value = int(raw_seconds_to_next)
+        lower, upper = MODEL_SECONDS_TO_NEXT_BOUNDS
+        if not (lower <= seconds_value <= upper):
+            return _error(
+                f"Field 'model_seconds_to_next'={seconds_value} outside "
+                f"[{lower}, {upper}]. Reading rejected."
+            )
+        predictions["model_seconds_to_next"] = seconds_value
 
     # Classification is driven by live sensor readings, with one deliberate
     # exception: the Edge-AI forecast can also trigger HEAT_STRESS_WARNING
