@@ -61,7 +61,7 @@
   // README "Model architecture" section) -- on the other ~119 out of 120
   // five-second polls, latest.predicted_* is null even though a perfectly
   // good recent forecast exists. Without this, the Overview cards would
-  // read "AI Forecast: pending" almost all the time post-warm-up, which
+  // read "Forecast: pending" almost all the time post-warm-up, which
   // reads as broken/idle rather than "working, just between updates."
   // "pending" is reserved for the genuine case: no forecast has ever
   // arrived yet (fresh boot, still warming up, or the master link is down).
@@ -312,9 +312,9 @@
     // Muted secondary text: numeric (optionally dated, when carried forward
     // from an earlier bucket -- see lastForecast above) when a forecast
     // exists at all, "pending" only when none has ever arrived yet.
-    if (typeof value !== "number") return "AI Forecast: pending";
+    if (typeof value !== "number") return "Forecast: pending";
     const asOf = asOfIso ? ` (as of ${fmtClock(asOfIso)})` : "";
-    return `AI Forecast: ${value.toFixed(1)} ${unit}${asOf}`;
+    return `Forecast: ${value.toFixed(1)} ${unit}${asOf}`;
   }
 
   function renderMetrics(latest, points) {
@@ -409,7 +409,7 @@
   function renderSpikeRisk(probability, asOfIso) {
     if (typeof probability !== "number") {
       el.valSpike.textContent = "--.-";
-      el.spikeNote.textContent = "Master node: pending";
+      el.spikeNote.textContent = "Not available yet";
       el.cardSpike.dataset.alert = "ok";
       return;
     }
@@ -979,7 +979,7 @@
       `spike(T)=${(frame.forecast.temp_spike_probability * 100).toFixed(0)}%`;
 
     el.testCaseActuator.textContent =
-      `Fan duty (PWM %): ${frame.actuator.fan_pct}%  ·  Heater: ${frame.actuator.heater_pct > 0 ? "ON" : "OFF"}`;
+      `Fan speed: ${frame.actuator.fan_pct}%  ·  Heater: ${frame.actuator.heater_pct > 0 ? "ON" : "OFF"}`;
   }
 
   function stopTestCases(finalMessage) {
