@@ -50,6 +50,9 @@ hardware/esp32s3_master/credentials.h
 # VS Code
 .vscode/
 
+# Claude Code (local assistant config/skills -- not part of the project)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
