@@ -1,5 +1,10 @@
 # Poultry Environmental Control - Telemetry Console
 
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/python-3.x-3776AB.svg)
+![Django](https://img.shields.io/badge/django-backend-092E20.svg)
+![Platform](https://img.shields.io/badge/hardware-ESP32%20%2B%20ESP32--S3-red.svg)
+
 Production-grade, API-driven telemetry dashboard for a smart poultry environment.
 Django backend, Edge-AI-ready JSON REST API, server-side environmental classifier,
 a two-board ESP-NOW hardware pipeline (ESP32 sensor node + ESP32-S3 master node
@@ -8,6 +13,21 @@ simulator for development without hardware, and a standard Bootstrap 5
 dashboard (dual-line forecast charts, actuator control, live console feed,
 historical reports/CSV export; Bootstrap and Chart.js are both vendored
 locally for air-gapped operation).
+
+## About
+
+This is the minor project of four undergraduate students in the Department of
+Electronics and Computer Engineering, **Thapathali Campus, Institute of
+Engineering (IOE), Tribhuvan University**, submitted in partial fulfillment of
+the Bachelor's degree in Electronics, Communication and Information
+Engineering (August 2026), under the supervision of **Er. Anup Shrestha**.
+
+It's a closed-loop environmental control system for a poultry shed: an ESP32
+sensor node reads temperature/humidity/ammonia and drives the fan and heater,
+an ESP32-S3 master node forecasts the next reading with an on-device
+TFLite Micro model, and a Django dashboard classifies, logs, and visualizes
+the whole thing in real time. See [Documentation & Reports](#documentation--reports)
+for the full report and defense decks, and [Designs](#designs) for the PCB.
 
 ## Architecture
 
@@ -216,3 +236,38 @@ entirely (not `n/a`) when the master node hasn't reported a probability yet.
 Includes a rolling 200-line buffer and a pause-scroll control. The server
 emits the same line via the `telemetry.ingest` logger, so `journalctl` and
 the browser can be cross-referenced without translation.
+
+## Designs
+
+KiCad schematic + PCB for the ESP32 sensor node live in `hardware/kicad/`
+(`kicad.kicad_pro`, `.kicad_sch`, `.kicad_pcb`, `.kicad_prl` -- open the
+`.kicad_pro` in KiCad 9). It lays out the ESP32 DevKit V1 footprint alongside
+the DHT11, MQ-137, fan/heater relay drive, and terminal-block wiring
+described in `hardware/esp32/README.md`.
+
+![KiCad PCB top-copper layout](docs/images/kicad_pcb_layout.png)
+
+## Documentation & Reports
+
+| Document | Path |
+|---|---|
+| Minor project report (full, 81 pages) | [`docs/minor_project_report.pdf`](docs/minor_project_report.pdf) |
+| Proposal presentation | [`docs/presentations/proposal_presentation.pdf`](docs/presentations/proposal_presentation.pdf) |
+| Final defense presentation | [`docs/presentations/final_presentation.pdf`](docs/presentations/final_presentation.pdf) |
+| Hardware & firmware architecture deep-dive | [`HARDWARE_DOCUMENTATION.md`](HARDWARE_DOCUMENTATION.md) |
+
+## Team
+
+| Name | Roll No. |
+|---|---|
+| Amir Bhattarai | THA080BEI005 |
+| Aviral Adhikari | THA080BEI011 |
+| Balram Sharma Kandel | THA080BEI012 |
+| Bikash BK | THA080BEI015 |
+
+Supervised by **Er. Anup Shrestha**, Department of Electronics and Computer
+Engineering, Thapathali Campus, Institute of Engineering, Tribhuvan University.
+
+## License
+
+MIT -- see [`LICENSE`](LICENSE).

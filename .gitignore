@@ -59,3 +59,27 @@ Thumbs.db
 htmlcov/
 .coverage
 coverage.xml
+
+# KiCad -- local working/backup cruft (the checked-in project lives in
+# hardware/kicad/: kicad.kicad_pro, .kicad_sch, .kicad_pcb, .kicad_prl only)
+hardware/kicad/kicad-backups/
+hardware/kicad/_autosave-*
+hardware/kicad/*.lck
+hardware/kicad/fp-info-cache
+hardware/kicad/*.kicad_sch-bak
+**/*.lck
+
+# Editor / OS backup cruft
+*.bak
+*~
+.idea/
+
+# LaTeX build artifacts, in case report/presentation sources are ever added
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.nav
+*.snm
+*.toc
+*.out
