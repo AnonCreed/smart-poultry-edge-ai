@@ -1,33 +1,62 @@
-# Poultry Environmental Control - Telemetry Console
+# Edge-AI Based Predictive Closed Control System for Smart Poultry Farming
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.x-3776AB.svg)
 ![Django](https://img.shields.io/badge/django-backend-092E20.svg)
 ![Platform](https://img.shields.io/badge/hardware-ESP32%20%2B%20ESP32--S3-red.svg)
 
-Production-grade, API-driven telemetry dashboard for a smart poultry environment.
-Django backend, Edge-AI-ready JSON REST API, server-side environmental classifier,
-a two-board ESP-NOW hardware pipeline (ESP32 sensor node + ESP32-S3 master node
-running an on-device TFLite Micro forecast/spike model), a standalone sensor
-simulator for development without hardware, and a standard Bootstrap 5
-dashboard (dual-line forecast charts, actuator control, live console feed,
-historical reports/CSV export; Bootstrap and Chart.js are both vendored
-locally for air-gapped operation).
+**Minor Project** -- Department of Electronics and Computer Engineering,
+Thapathali Campus, Institute of Engineering (IOE), Tribhuvan University.
+Submitted in partial fulfillment of the Bachelor's degree in Electronics,
+Communication and Information Engineering (August 2026), under the
+supervision of **Er. Anup Shrestha**, by Amir Bhattarai, Aviral Adhikari,
+Balram Sharma Kandel, and Bikash BK.
 
 ## About
 
-This is the minor project of four undergraduate students in the Department of
-Electronics and Computer Engineering, **Thapathali Campus, Institute of
-Engineering (IOE), Tribhuvan University**, submitted in partial fulfillment of
-the Bachelor's degree in Electronics, Communication and Information
-Engineering (August 2026), under the supervision of **Er. Anup Shrestha**.
+Poultry farming is a major part of Nepal's agricultural sector, and most
+farms still run open-house systems where the indoor environment tracks
+whatever the weather outside is doing. During the brooding stage (the first
+two weeks after hatching) chicks are especially sensitive to temperature
+swings, humidity, and ammonia buildup from droppings -- conditions farmers
+today mostly manage by manual observation and experience, which means
+unfavorable changes can go unnoticed until they've already hurt the flock.
 
-It's a closed-loop environmental control system for a poultry shed: an ESP32
-sensor node reads temperature/humidity/ammonia and drives the fan and heater,
-an ESP32-S3 master node forecasts the next reading with an on-device
-TFLite Micro model, and a Django dashboard classifies, logs, and visualizes
-the whole thing in real time. See [Documentation & Reports](#documentation--reports)
-for the full report and defense decks, and [Designs](#designs) for the PCB.
+This project came out of discussions around the bird-flu outbreaks in Nepal
+in 2026. Actually detecting or preventing disease was out of scope for a
+minor project, but keeping a poultry house's environment inside a safe band
+is a problem we could tackle directly: continuous IoT sensing, an on-device
+ML model that forecasts where temperature and ammonia are heading (not just
+where they are), and automated fan/heater control that reacts before a
+threshold is crossed rather than after.
+
+That's what this repository is: the full system, not just the dashboard --
+
+- **`hardware/esp32/`** -- an ESP32 sensor node reading temperature, humidity
+  and ammonia (DHT11 + MQ-137), driving the fan/heater relays.
+- **`hardware/esp32s3_master/`** -- an ESP32-S3 master node that receives
+  those readings over ESP-NOW and runs an on-device TFLite Micro model to
+  forecast the next reading and flag an ammonia-spike probability, before
+  handing everything to the backend.
+- **`hardware/kicad/`** -- the KiCad schematic and PCB for the sensor node.
+- **`telemetry/`** -- the Django backend: ingestion API, server-side rule
+  classifier, and the live dashboard (charts, actuator control, console
+  feed, historical export).
+- **`docs/`** -- the written report and the proposal/final defense decks
+  submitted for the degree.
+
+See [Documentation & Reports](#documentation--reports) for the full report
+and defense decks, and [Designs](#designs) for the PCB.
+
+## System at a glance
+
+Django backend, Edge-AI-ready JSON REST API, server-side environmental
+classifier, a two-board ESP-NOW hardware pipeline (ESP32 sensor node +
+ESP32-S3 master node running an on-device TFLite Micro forecast/spike
+model), a standalone sensor simulator for development without hardware, and
+a standard Bootstrap 5 dashboard (dual-line forecast charts, actuator
+control, live console feed, historical reports/CSV export; Bootstrap and
+Chart.js are both vendored locally for air-gapped operation).
 
 ## Architecture
 
